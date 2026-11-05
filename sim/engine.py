@@ -44,6 +44,17 @@ class FundConfig:
     sleeve_split: dict[str, float] = field(default_factory=lambda: {"WBTC": 1.0, "cbBTC": 0.0})
     oracle_deviation: float = 0.005
     oracle_heartbeat: int = 1
+    # Sweep & Extension parameters:
+    deployment_cap: str = "none"  # "none", "25%", "15%"
+    deployment_cap_pct: float | None = None  # None, 0.25, 0.15
+    policy_type: str = "kpk_published"  # "kpk_published" or "kpk_vol_scaled"
+    vol_scaled_threshold: float = 0.65  # 7-day annualised realised vol threshold
+    vol_scaled_floor_ltv: float = 0.50
+    tbill_rate_annual: float = 0.0403  # Latest DTB3 FRED rate (4.03%)
+    allocation_weights: dict[str, float] = field(
+        default_factory=lambda: {"carry": 0.45, "basis": 0.20, "amm": 0.15, "tbill": 0.20}
+    )
+    basis_gate_active: bool = True
 
     @classmethod
     def from_yaml(cls, yaml_path: Path | str | None = None) -> FundConfig:
@@ -99,6 +110,8 @@ def run_simulation(
     borrow_rates: np.ndarray | None = None,
     deploy_yields: np.ndarray | None = None,
     irm_params: AaveIRMParams | None = None,
+    oracle_prices: np.ndarray | None = None,
+    rolling_vol_7d: np.ndarray | None = None,
 ) -> SimulationResults:
     """Run hourly Monte Carlo simulation across price paths.
 
@@ -112,6 +125,7 @@ def run_simulation(
       borrow_rates: Optional pre-computed hourly borrow rates.
       deploy_yields: Optional pre-computed hourly deployment yields.
       irm_params: Optional Aave IRM parameters.
+      oracle_prices: Optional pre-computed Chainlink oracle prices of shape [n_paths, n_hours + 1].
 
     Returns:
       SimulationResults dataclass with per-path metrics.
@@ -150,24 +164,57 @@ def run_simulation(
         hourly_borrow = np.broadcast_to(np.asarray(borrow_rates, dtype=float), (n_paths, n_hours))
 
     if deploy_yields is None:
-        # Effective diluted vault yield
-        diluted = diluted_apy(
-            base_apy=base_deploy_apy,
-            vault_tvl=vault_tvl,
-            deposit=initial_deployed_usdc[:, None],
-            marginal_ratio=marginal_dilution_ratio,
-        )
-        hourly_deploy = hourly_rate_from_apy(diluted)
-        hourly_deploy = np.broadcast_to(hourly_deploy, (n_paths, n_hours))
+        # Check deployment cap
+        cap_pct = cfg.deployment_cap_pct
+        if cap_pct is None:
+            if cfg.deployment_cap == "25%":
+                cap_pct = 0.25
+            elif cfg.deployment_cap == "15%":
+                cap_pct = 0.15
+
+        if cap_pct is not None:
+            n_vaults = 3 if cfg.sleeve_split.get("cbBTC", 0.0) > 0.0 else 2
+            v_single = vault_tvl / 2.0  # e.g. $50M per vault
+            v_agg = n_vaults * v_single
+            max_vault_capacity = v_agg * cap_pct
+
+            d_vault = np.minimum(initial_deployed_usdc, max_vault_capacity)
+            d_tbill = np.maximum(0.0, initial_deployed_usdc - max_vault_capacity)
+
+            diluted_v = diluted_apy(
+                base_apy=base_deploy_apy,
+                vault_tvl=v_agg,
+                deposit=d_vault[:, None],
+                marginal_ratio=marginal_dilution_ratio,
+            )
+            with np.errstate(divide="ignore", invalid="ignore"):
+                blended = np.where(
+                    initial_deployed_usdc[:, None] > 0,
+                    (d_vault[:, None] * diluted_v + d_tbill[:, None] * cfg.tbill_rate_annual)
+                    / initial_deployed_usdc[:, None],
+                    base_deploy_apy,
+                )
+            hourly_deploy = hourly_rate_from_apy(blended)
+            hourly_deploy = np.broadcast_to(hourly_deploy, (n_paths, n_hours))
+        else:
+            diluted = diluted_apy(
+                base_apy=base_deploy_apy,
+                vault_tvl=vault_tvl,
+                deposit=initial_deployed_usdc[:, None],
+                marginal_ratio=marginal_dilution_ratio,
+            )
+            hourly_deploy = hourly_rate_from_apy(diluted)
+            hourly_deploy = np.broadcast_to(hourly_deploy, (n_paths, n_hours))
     else:
         hourly_deploy = np.broadcast_to(np.asarray(deploy_yields, dtype=float), (n_paths, n_hours))
 
-    # Pre-compute Chainlink oracle price series
-    oracle_prices = ChainlinkOracle.simulate_path(
-        paths,
-        deviation_threshold=cfg.oracle_deviation,
-        heartbeat_hours=cfg.oracle_heartbeat,
-    )
+    # Pre-compute Chainlink oracle price series if not passed
+    if oracle_prices is None:
+        oracle_prices = ChainlinkOracle.simulate_path(
+            paths,
+            deviation_threshold=cfg.oracle_deviation,
+            heartbeat_hours=cfg.oracle_heartbeat,
+        )
 
     # State vectors across paths
     collateral_btc = np.full(n_paths, init_btc, dtype=float)
@@ -181,6 +228,28 @@ def run_simulation(
     # Initial HF = (C0 * P0 * LLTV) / Debt0 = LLTV / target_ltv
     init_hf = (init_btc * p0 * cfg.lltv) / initial_debt_usdc
     min_hf = init_hf.copy()
+    hf = np.empty(n_paths, dtype=float)
+
+    # Pre-check whether negative carry ever occurs across the matrix
+    net_carry_matrix = hourly_deploy - hourly_borrow
+    has_any_neg_carry = np.any(net_carry_matrix < 0.0)
+    w_size = policy.negative_carry_window_hours
+    n_windows = policy.negative_carry_consecutive_windows
+    req_hours = w_size * n_windows
+
+    # Pre-compute rolling 7-day volatility for vol-scaled policy if not provided
+    rolling_vol_7d_arr = rolling_vol_7d
+    if rolling_vol_7d_arr is None and cfg.policy_type == "kpk_vol_scaled":
+        w = 168
+        if n_hours >= w:
+            log_p = np.log(paths)
+            rets = np.diff(log_p, axis=1)
+            cumsum_r = np.pad(np.cumsum(rets, axis=1), ((0, 0), (1, 0)))
+            cumsum_r2 = np.pad(np.cumsum(rets**2, axis=1), ((0, 0), (1, 0)))
+            sum_r = cumsum_r[:, w:] - cumsum_r[:, :-w]
+            sum_r2 = cumsum_r2[:, w:] - cumsum_r2[:, :-w]
+            var_7d = np.maximum(0.0, sum_r2 / float(w) - (sum_r / float(w)) ** 2)
+            rolling_vol_7d_arr = np.sqrt(var_7d) * np.sqrt(8760.0)
 
     # Hourly simulation loop
     for t in range(1, n_hours + 1):
@@ -192,16 +261,17 @@ def run_simulation(
         r_deploy = hourly_deploy[:, rate_idx]
 
         active_mask = (~is_liquidated) & (~is_unwound)
+        if not np.any(active_mask):
+            break
 
         # 1. Accrue borrow cost and deployment yield for active paths
         debt_usdc[active_mask] *= 1.0 + r_borrow[active_mask]
         deployed_usdc[active_mask] *= 1.0 + r_deploy[active_mask]
 
-        # 2. Compute current health factor
+        # 2. Compute current health factor for active positions
         collat_val = collateral_btc * orc_p
-        hf = np.full(n_paths, np.inf, dtype=float)
-        valid_debt = debt_usdc > 0.0
-        hf[valid_debt] = (collat_val[valid_debt] * cfg.lltv) / debt_usdc[valid_debt]
+        hf[:] = np.inf
+        hf[active_mask] = (collat_val[active_mask] * cfg.lltv) / debt_usdc[active_mask]
 
         # Update min_hf for active positions
         min_hf[active_mask] = np.minimum(min_hf[active_mask], hf[active_mask])
@@ -235,19 +305,14 @@ def run_simulation(
         unwind_drop_trigger = np.zeros(n_paths, dtype=bool)
         if t >= 24:
             p_24h_ago = paths[:, t - 24]
-            btc_24h_change = (mkt_p - p_24h_ago) / p_24h_ago
-            unwind_drop_trigger = active_mask & (btc_24h_change <= policy.btc_24h_drop_threshold)
+            unwind_drop_trigger = active_mask & (mkt_p <= p_24h_ago * 0.90)
 
         # (c) Full unwind: 2 consecutive 6h negative carry windows
         unwind_carry_trigger = np.zeros(n_paths, dtype=bool)
-        w_size = policy.negative_carry_window_hours
-        n_windows = policy.negative_carry_consecutive_windows
-        req_hours = w_size * n_windows
-        if t >= req_hours:
-            # Slices of net carry: hourly_deploy - hourly_borrow
-            net_c = hourly_deploy[:, t - req_hours : t] - hourly_borrow[:, t - req_hours : t]
-            w1_mean = np.mean(net_c[:, w_size:], axis=1)    # Most recent 6h window
-            w2_mean = np.mean(net_c[:, :w_size], axis=1)    # Prior 6h window
+        if has_any_neg_carry and t >= req_hours:
+            net_c = net_carry_matrix[:, t - req_hours : t]
+            w1_mean = np.sum(net_c[:, w_size:], axis=1) / float(w_size)
+            w2_mean = np.sum(net_c[:, :w_size], axis=1) / float(w_size)
             unwind_carry_trigger = active_mask & (w1_mean < 0.0) & (w2_mean < 0.0)
 
         # Combine full unwind triggers
@@ -275,6 +340,26 @@ def run_simulation(
 
             debt_usdc[deleverage_trigger] -= repay_actual
             deployed_usdc[deleverage_trigger] -= repay_actual
+
+        # (e) Volatility-scaled LTV policy: pre-emptive deleveraging when 7-day realised vol spikes
+        if cfg.policy_type == "kpk_vol_scaled" and t >= 168 and rolling_vol_7d_arr is not None:
+            vol_7d = rolling_vol_7d_arr[:, t - 168]
+            high_vol = active_mask & (vol_7d > cfg.vol_scaled_threshold)
+            if np.any(high_vol):
+                scale = np.clip(
+                    cfg.vol_scaled_threshold / vol_7d[high_vol],
+                    cfg.vol_scaled_floor_ltv / cfg.target_ltv,
+                    1.0,
+                )
+                scaled_ltv = cfg.target_ltv * scale
+                max_debt = collat_val[high_vol] * scaled_ltv
+                excess = debt_usdc[high_vol] - max_debt
+                repay_vol_mask = excess > 0.0
+                if np.any(repay_vol_mask):
+                    idx_high = np.where(high_vol)[0][repay_vol_mask]
+                    repay_amt = np.minimum(excess[repay_vol_mask], deployed_usdc[idx_high])
+                    debt_usdc[idx_high] -= repay_amt
+                    deployed_usdc[idx_high] -= repay_amt
 
     # Simulation conclusion: unwind any positions still active at final market prices
     final_mkt_p = paths[:, -1]
