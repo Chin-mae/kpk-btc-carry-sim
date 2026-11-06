@@ -1,11 +1,11 @@
 # KPK BTC Carry Fund: Institutional Risk Architecture and Parameter Recommendation Memo
 
-**Document Status:** Final Deliverable (Phase 3D Parameter Sweep and Portfolio Risk Finish)  
+**Document Status:** Research Memo (Phase 3E Parameter Sweep and Scenario Verification)  
 **Date:** 6 November 2026  
 **Author:** Chinmay Gupta  
 **Scope:** Institutional Bitcoin Carry Fund at $50,000,000 USD Design Scale  
 **Framework:** Agent-Based Monte Carlo Simulation Engine (SPEC v0.3)  
-**Traceability:** Fully reproducible; all metrics traceable directly to `report/runs.jsonl` (stamped git commit `7b809d8b`).
+**Traceability:** Fully reproducible; all metrics traceable directly to `report/runs.jsonl` (stamped git commit `779bf2d2`).
 
 ---
 
@@ -22,7 +22,7 @@ The mechanical selection rule defined in `sim/sweep.py` (`select_recommended_cel
 - **Target LTV:** 70.2% (retained from KPK published template)
 - **Health Factor Unwind Floor:** 1.05 (lowered from template 1.13)
 - **Collateral Wrapper Split:** 70:30 WBTC:cbBTC (diversified from 100:0 WBTC)
-- **Deployment Cap:** 25% of vault TVL (added constraint vs template uncapped)
+- **Deployment Split:** Three vaults (equal thirds, loss share 1/3 vs 1/2 uncapped, modelled under the 25% cap parameter setting)
 - **Execution Policy:** `kpk_published` (retained from published policy)
 
 On standard simulation paths, the empirical data does not indict KPK's 70.2% leverage. Rather, the evidence indicts:
@@ -31,7 +31,7 @@ On standard simulation paths, the empirical data does not indict KPK's 70.2% lev
 3. Uncapped vault deployments, which expose fund equity to single-destination counterparty defaults.
 
 ### 1.2 Methodological Candour: Withdrawal of Preliminary Draft
-An earlier internal draft of this deliverable recommended a 60.0% target LTV with volatility-scaled deleveraging (`cell_269`). That draft failed internal adversarial review: the 60.0% configuration was designated prior to the completion of the sweep, scenario losses were tabulated with static additives rather than simulated injectors, and allocation extensions had not been executed. In accordance with institutional research standards, that preliminary draft is formally withdrawn. The results presented in this memo are generated strictly from the committed codebase (commit `7b809d8b`), executing real event shock injectors through the simulation engine across all 1,125 logged runs.
+An earlier internal draft of this deliverable recommended a 60.0% target LTV with volatility-scaled deleveraging (`cell_269`). That draft failed internal adversarial review: the 60.0% configuration was designated prior to the completion of the sweep, scenario losses were tabulated with static additives rather than simulated injectors, and allocation extensions had not been executed. In accordance with institutional research standards, that preliminary draft is formally withdrawn. The results presented in this memo are generated strictly from the committed codebase (commit `779bf2d2`), executing real event shock injectors through the simulation engine across all 1,126 logged runs.
 
 ### 1.3 Design Scale
 All quantitative evaluations are sized to the institutional design scale of **$50,000,000 USD**. Sizing parameterisation accounts for non-linear scale effects: vault dilution curves, protocol pool utilisation displacement, and liquidator execution constraints during liquidity cascades. Sizing is evaluated as an engineering target for risk modeling.
@@ -64,7 +64,7 @@ Yields for non-carry sleeves are documented transparently below:
 | **US Treasury 3-Month Bills** | 4.03% | Observed Data Series | FRED series `DTB3` (`data/raw/dtb3.csv`), secondary market rate dated 3 Nov 2026. 2023 to 2026 range: 3.52% to 5.36% (mean 4.49%). |
 | **Basis Funding Rate** | 2.20% | Market Proxy | Observed 2026 Ethena / CeFi perpetual funding compression; labelled as an empirical proxy for BTC perpetual basis. |
 | **AMM Liquidity Yield** | 6.00% | Assumed Parameter | Assumed baseline pool fee net APY; AMM dynamic simulation sub-engine remains future work. |
-| **Carry Sleeve Yield** | 1.9373% | Simulated Output | Simulated net BTC yield from selected Cell 149 under Historical Block Bootstrap (stamped `7b809d8b`). |
+| **Carry Sleeve Yield** | 1.9373% | Simulated Output | Simulated net BTC yield from selected Cell 149 under Historical Block Bootstrap (stamped `779bf2d2`). |
 
 ### 2.3 Automated Basis Gate Mechanics
 Throughout 2026, perpetual funding rates compressed toward 2.20% annualised, falling well below short-term US Treasury bill yields (4.03%). Sizing an un-gated basis sleeve at 20% would create yield drag. The fund enforces an automated gate rule:
@@ -73,9 +73,9 @@ When active, the basis allocation redirects into risk-free 3-month T-bills. This
 
 ### 2.4 Allocation Extension Results
 Evaluating the portfolio across carry sleeve weightings reveals the following performance trade-off:
-- **30% Carry / 15% AMM / 55% T-Bill:** Portfolio Net APY **3.7707%**, Portfolio ES95 **-0.8114%**.
-- **45% Carry / 15% AMM / 40% T-Bill:** Portfolio Net APY **3.3090%**, Portfolio ES95 **-0.6477%**.
-- **60% Carry / 15% AMM / 25% T-Bill:** Portfolio Net APY **2.8488%**, Portfolio ES95 **-0.4841%**.
+- **30% Carry / 15% AMM / 55% T-Bill:** Portfolio Net APY **3.8442%**, Portfolio ES95 **-0.8143%**.
+- **45% Carry / 15% AMM / 40% T-Bill:** Portfolio Net APY **3.4189%**, Portfolio ES95 **-0.6521%** (matches grid cell 149 exactly).
+- **60% Carry / 15% AMM / 25% T-Bill:** Portfolio Net APY **2.9949%**, Portfolio ES95 **-0.4899%**.
 
 Higher T-bill allocations generate higher portfolio APY because risk-free sovereign cash (4.03%) yields more than the net carry spread (~1.94%) in compressed rate environments. The 45% carry weighting is maintained as the baseline balance between Bitcoin carry generation and cash liquidity.
 
@@ -84,7 +84,7 @@ Higher T-bill allocations generate higher portfolio APY because risk-free sovere
 ## 3. Venue Layer and Governance Liveness Gate (§13.2 and §13.3)
 
 ### 3.1 Primary Lending Venue Parameters
-Venue parameters are derived directly from protocol contracts and verified configuration files (`configs/fund_template.yaml`):
+Venue parameters are taken from the verified fund template (`https://docs.kpk.io/funds/funds/wbtc-carry`, archived in `configs/fund_template.yaml`):
 
 | Venue | Protocol Structure | Liquidation LLTV | Target LTV (HF 1.21) | Protocol Status and Key Risk Factor |
 | :--- | :--- | :--- | :--- | :--- |
@@ -95,7 +95,7 @@ Venue parameters are derived directly from protocol contracts and verified confi
 | **Compound v3** | Single-Borrow Market | **0.860** | **0.711** | **Approved Alternative:** cbBTC approved; WBTC under review per template configuration. |
 
 ### 3.2 Gearbox Protocol Status
-Gearbox Protocol was noted in preliminary literature but is absent from the approved primary venue list in `configs/fund_template.yaml`. An onchain audit shows total Gearbox TVL has contracted to ~$24.2M USD (DefiLlama, November 2026). Deploying a $22.5M carry sleeve would consume >90% of the entire protocol, creating severe concentration and liquidity exit bottlenecks. Gearbox is therefore excluded as a primary borrowing venue.
+Gearbox Protocol was noted in preliminary literature but is absent from the approved primary venue list in `configs/fund_template.yaml`. Deploying a $22.5M carry sleeve into Gearbox would encounter severe capacity constraints at the fund's $50M design scale, creating potential liquidity exit bottlenecks. Gearbox is therefore excluded as a primary borrowing venue on qualitative capacity grounds.
 
 ### 3.3 Balancer Protocol Wind-Down Disqualification
 The hiring job description referenced Balancer among potential venues. Diligence confirms this is a stale reference:
@@ -129,10 +129,10 @@ To evaluate robustness without statistical blending, results are produced across
 ### 4.3 Delta and Risk Profile
 The basis sleeve is delta-neutral. In contrast, the carry sleeve maintains **BTC-downside directional exposure**. Although the borrowed USDC leg is deployed into dollar lending vaults, the collateral backing the loan is Bitcoin. When Bitcoin price declines, the dollar value of collateral contracts while the dollar debt accrues interest, driving the health factor downward toward liquidation thresholds.
 
-### 4.4 Hypothetical Vault Dilution Example
-At an institutional scale of $50M, vault deposit dilution impacts net yield. Under the 25% vault TVL cap, depositing $3.95M into a $15.8M destination vault represents 20% of post-deposit TVL:
-$$\text{APY}_{\text{diluted}} = \text{APY}_{\text{base}} \times \frac{V_{\text{pre}}}{V_{\text{pre}} + D_{\text{fund}}} = 8.50\% \times \frac{15.8}{19.75} = 6.80\%$$
-This example is labelled hypothetical as live vault TVLs fluctuate over time.
+### 4.4 Equal-Thirds Slicing Dilution Example
+The modeled risk mitigation slices borrowed USDC equally across three destination vaults (loss share 1/3, modelled under the 25% cap parameter). Sizing $15.795M USDC equally across three vaults places $5.265M in each vault. As an illustrative example, depositing $5.265M into a $21.06M destination vault represents 20% of post-deposit TVL:
+$$\text{APY}_{\text{diluted}} = \text{APY}_{\text{base}} \times \frac{V_{\text{pre}}}{V_{\text{pre}} + D_{\text{fund}}} = 8.50\% \times \frac{21.06}{26.325} = 6.80\%$$
+This arithmetic is labelled an illustrative example; no claim of live vault TVLs is made, as live TVLs fluctuate over time.
 
 ---
 
@@ -145,23 +145,34 @@ On 29 October 2026, an external security incident froze Binance cross-chain brid
 - **Outcome:** The fund agent identified the external venue freeze signal at hour 24 and initiated an automated full unwind. The loan was repaid in full ($277,337 USDC) and 4.925 WBTC was reclaimed intact. Liquidation loss was 0.0000 BTC.
 - **Methodological Caveat:** This test serves as a mechanics-consistency validation, confirming that the simulation engine accurately reproduces documented agent behaviour and protocol parameters. It does not constitute an independent, out-of-sample statistical proof of future performance.
 
-### 5.2 Replay 2: 10 October 2025 Cascade Arithmetic
-On 10 October 2025, BTC experienced an intraday drop of -17.4118% (from $121,814.96 to $100,604.83).
+### 5.2 Replay 2: 10 October 2025 Cascade Arithmetic (Cascade-Adjusted)
+On 10 October 2025, BTC experienced an intraday drop. Historical hourly candle data (`data/raw/btc_usd_hourly.csv`) records:
+- First close: $121,814.96
+- Lowest hourly close in 24h: $112,980.28 (-7.2525%)
+- Intraday low: $107,000.00 (-12.1619%)
+
+To stress the protocol's distance-to-liquidation arithmetic under extreme conditions, the historical replay uses a cascade-adjusted path where the trough is forced to the template's theoretical liquidation boundary.
 - **Distance to Liquidation Arithmetic:** At 70.2% Target LTV and 85.0% LLTV, the theoretical price drop required to breach $\text{HF} = 1.0$ is:
-  $$1.0 - \frac{\text{Target LTV}}{\text{LLTV}} = 1.0 - \frac{0.702}{0.850} = 17.4118\%$$
-- **Outcome:** At hour 22 of the historical price path, price reached the theoretical liquidation threshold. The position health factor touched 1.0000. Under an unmanaged position, this point initiates liquidation. This replay validates the distance-to-liquidation arithmetic. It is an arithmetic verification; no claim of an executed onchain liquidation is made.
+  $$1.0 - \frac{\text{Target LTV}}{\text{LLTV}} = 1.0 - \frac{0.702}{0.850} = 17.4118\% \quad (\text{a fall from } \$121,814.96 \text{ to } \$100,604.83)$$
+- **Outcome:** At relative hour 4 of the cascade-adjusted path, price reaches the theoretical liquidation threshold. The position health factor touches 1.0000. Under an unmanaged position, this point initiates liquidation. This replay validates the theoretical distance-to-liquidation arithmetic. It is an arithmetic verification; no claim of an executed onchain liquidation during historical trading is made.
 
 ---
 
 ## 6. Efficient Frontier and Parameter Recommendations (§6.2)
 
 ### 6.1 Mechanical Selection Outcome
-Across the 1,080 evaluated parameter combinations, the mechanical selection rule selected **Cell 149**:
-- Target LTV: 70.2%
-- HF Unwind Floor: 1.05
-- Sleeve Split: 70:30 WBTC:cbBTC
-- Deployment Cap: 25%
-- Policy: `kpk_published`
+Across the 1,080 evaluated parameter combinations (360 per generator panel), the mechanical selection rule (`select_recommended_cell`: filter $P(\text{liquidation})=0$ and min-HF $p_5 \ge 1.10$, ranking by carry ES95 loss ascending then median net APY descending) operates with the following explicit mathematical properties:
+1. **Admissibility:** On the primary Historical Block Bootstrap panel, all 360 cells satisfy both filter criteria ($P(\text{liquidation})=0.00\%$ and min-HF $p_5 \ge 1.10$ hold across all combinations due to automated unwinds).
+2. **Exact Ties:** Four cells tie exactly on both ranking metrics: Cell 149, Cell 150, Cell 152, and Cell 153 all produce carry ES95 of -0.0737% and carry median net APY of 1.9373%.
+3. **Selection Tie-Breaker:** The selection among exact ties is determined by stable order in the evaluated grid (Cell 149 is evaluated first). All four tied cells share the identical core risk architecture: 70.2% LTV, 1.05 unwind floor, and `kpk_published` policy.
+4. **Signed ES95 Ranking Interpretation:** Because standard surviving paths experience positive carry return even in the 5% tail, the signed ES95 ranking is tail-return optimisation among configurations whose worst-5% standard-path outcomes are still gains, stated in those words.
+
+The selected configuration is **Cell 149**:
+- **Target LTV:** 70.2%
+- **HF Unwind Floor:** 1.05
+- **Sleeve Split:** 70:30 WBTC:cbBTC
+- **Deployment Split:** Three vaults (equal thirds, loss share 1/3 vs 1/2 uncapped, modelled under the 25% cap parameter setting)
+- **Execution Policy:** `kpk_published`
 
 ### 6.2 Three-Panel Performance Comparison: Recommended (Cell 149) vs Template (Cell 163)
 The three generator panels are reported side by side below, unblended:
@@ -172,7 +183,7 @@ The three generator panels are reported side by side below, unblended:
 | Target LTV | 70.2% | **70.2%** | Leverage retained; distance to liquidation is 17.41% |
 | HF Unwind Floor | 1.13 | **1.05** | Lowers floor; prevents false-alarm unwinds during transient noise |
 | Collateral Split | 100% WBTC : 0% cbBTC | **70% WBTC : 30% cbBTC** | Diversifies custodian and wrapper bridge exposure |
-| Vault Deployment Cap | None (Uncapped) | **25% of Vault TVL** | Limits single-vault counterparty default exposure |
+| Vault Deployment Split | None (Uncapped, 1/2 split) | **Three Vaults (Equal Thirds)** | Modelled under 25% cap parameter; cuts single-vault default loss share from 1/2 to 1/3 |
 | Execution Policy | `kpk_published` | **`kpk_published`** | Standard published policy retained |
 | **Historical Block Bootstrap (10,000 paths)** | | | |
 | Carry Median Net APY | 1.8843% | **1.9373%** | +5.3 bps improvement from reduced unwind churn |

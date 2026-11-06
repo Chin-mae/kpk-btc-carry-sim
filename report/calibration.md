@@ -51,15 +51,22 @@ Jump Diffusion     | Std (Vol)              | +0.004913    | 0.004918 +/- 15%   
 Jump Diffusion     | Skewness               | -0.95        | [-1.5, +0.2]           | PASS
 Jump Diffusion     | Excess Kurtosis        | +6.74        | kurt >= 4.0            | PASS
 Jump Diffusion     | Worst 1% Move          | -0.011782    | [-2.0%, -1.0%]         | PASS
-Jump Diffusion     | Vol Clustering (r^2)   | -0.008340    | <= 0.05 (i.i.d. Poisson) | PASS
+Jump Diffusion     | Vol Clustering (r^2)   | -0.008340    | 0.1775 +/- 0.08        | FAIL
 Regime-Switching   | Mean Return            | -0.000018    | |mean| < 5e-4          | PASS
 Regime-Switching   | Std (Vol)              | +0.004888    | 0.004918 +/- 15%       | PASS
 Regime-Switching   | Skewness               | -0.39        | [-1.0, +0.5]           | PASS
 Regime-Switching   | Excess Kurtosis        | +14.01       | kurt >= 4.0            | PASS
 Regime-Switching   | Worst 1% Move          | -0.014800    | [-2.0%, -1.0%]         | PASS
-Regime-Switching   | Vol Clustering (r^2)   | +0.059546    | > 0.03 (Markov persistent) | PASS
+Regime-Switching   | Vol Clustering (r^2)   | +0.059546    | 0.1775 +/- 0.08        | FAIL
 ================================================================================
->> ALL CALIBRATION CHECKS PASSED: Model is statistically calibrated to Jan 2023–Oct 2026 BTC reality.
+ CALIBRATION VERDICT & STATUS (SPEC §7)
+================================================================================
+>> Historical Block Bootstrap (Primary): ALL 6 CHECKS PASSED. Accepted as primary generator.
+>> Jump Diffusion (Robustness Panel 1): 5/6 CHECKS PASSED. Vol clustering MISSED (-0.0083 vs 0.1775)
+   due to memoryless Poisson arrivals. Retained as labelled robustness panel for jump risk.
+>> Regime-Switching (Robustness Panel 2): 5/6 CHECKS PASSED. Vol clustering MISSED (0.0595 vs 0.1775)
+   due to Markov state persistence limits. Retained as labelled robustness panel for macro shifts.
+>> Overall Verdict: PARTIAL CALIBRATION: Primary generator accepted; robustness misses disclosed.
 ================================================================================
 ```
 
