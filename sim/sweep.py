@@ -753,10 +753,12 @@ def compute_and_log_correlations(
     git_commit = get_git_commit()
 
     cfg = selected_cell.to_fund_config()
+    t0_c = time.perf_counter()
     res = run_simulation(price_paths, cfg)
     btc_price_returns = (price_paths[:, -1] / price_paths[:, 0]) - 1.0
 
     corrs = compute_calm_vs_crisis_correlations(res.net_yield_btc, btc_price_returns)
+    w_sec = time.perf_counter() - t0_c
 
     # Hash input vectors for cryptographic reproducibility
     vec_data = np.concatenate([res.net_yield_btc, btc_price_returns]).tobytes()
@@ -795,7 +797,7 @@ def compute_and_log_correlations(
         "producing_script": "sim/sweep.py:compute_and_log_correlations",
         "input_vectors_hash": vec_hash,
         "config_hash": cfg_hash,
-        "wall_time_sec": 0.05,
+        "wall_time_sec": round(w_sec, 4),
     }
 
     with open(runs_path, "a", encoding="utf-8") as f:
@@ -1196,7 +1198,9 @@ def run_scenario_evaluations(
     for base_id, var_id, var_inj, var_label in multi_severities:
         inj_dict = var_inj.to_dict() if hasattr(var_inj, "to_dict") else var_id
         for cfg, cell_obj, setting_name in [(cfg_template, tmpl_cell, "template"), (cfg_recommended, selected_cell, "recommended")]:
+            t0_v = time.perf_counter()
             res_v = run_simulation(paths_base, cfg, scenario_injector=var_inj)
+            w_v = time.perf_counter() - t0_v
             losses_v = -res_v.net_yield_btc
             med_v = float(np.median(losses_v))
             p95_v = float(np.percentile(losses_v, 95))
@@ -1238,7 +1242,7 @@ def run_scenario_evaluations(
                 "p_liquidation": round(float(np.mean(res_v.liquidated)), 4),
                 "p_unwind": round(float(np.mean(res_v.unwind_count > 0)), 4),
                 "config_hash": compute_config_hash(v_cfg_for_hash),
-                "wall_time_sec": 0.05,
+                "wall_time_sec": round(w_v, 4),
             })
 
     # Append all scenario records to runs.jsonl
