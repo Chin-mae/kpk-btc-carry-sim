@@ -4,7 +4,7 @@
 **Date:** 6 November 2026  
 **Author:** Chinmay Gupta  
 **Engine:** Agent-Based Monte Carlo Engine (10,000 paths x 90 days hourly)  
-**Traceability:** Fully reproducible; logged to `report/runs.jsonl` (git commit `779bf2d2`)
+**Traceability:** Fully reproducible; logged to `report/runs.jsonl` (grid runs stamped `7b809d8b`, downstream runs stamped `520262df`)
 
 ---
 

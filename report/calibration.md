@@ -88,7 +88,7 @@ SPEC §7 requires simulated paths to match historical hourly volatility, fat tai
   - Medium-volatility regime: 0.55% hourly (51.8% annualised)
   - High-volatility regime: 0.95% hourly (89.2% annualised)
   The generator accurately captures high excess kurtosis (14.01) and worst 1% drawdown (-1.48%).
-- **Known limitation (Clustering Attenuation):** While Markov transition persistence produces positive lag-1 autocorrelation of squared returns (0.0595 pooled, 0.0595 mean path), this value falls substantially below historical realized clustering (0.1775). Under a strict empirical match criteria (0.1775 +/- 0.08), the regime model misses. Intra-regime returns are drawn from zero-mean empirical or Gaussian pools without intra-regime autoregressive heteroskedasticity (GARCH), dampening path-level clustering.
+- **Known limitation (Clustering Attenuation):** While Markov transition persistence produces positive lag-1 autocorrelation of squared returns (0.0588 pooled, 0.0595 mean path), this value falls substantially below historical realized clustering (0.1775). Under a strict empirical match criteria (0.1775 +/- 0.08), the regime model misses. Intra-regime returns are drawn from zero-mean empirical or Gaussian pools without intra-regime autoregressive heteroskedasticity (GARCH), dampening path-level clustering.
 
 ## 3. Methodological Conclusion
 
