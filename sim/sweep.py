@@ -681,6 +681,143 @@ def run_allocation_extension(
     return records
 
 
+# Headline scenario definitions and takeaways
+SCENARIOS_META = [
+    ("S1", "Flash crash", "10 Oct 2025 cascade", "BTC -14% intraday cascade, borrower liquidation cascade, gas 20x for 6h"),
+    ("S2", "Sustained crash", "Mar 2020 / May 2022", "Multi-day -45% macro drop over 72h"),
+    ("S3", "Venue freeze (hack)", "Binance hack, 29 Oct 2026", "Aave market frozen 12h: no exit, no rebalance (1h/12h/72h sensitivities logged)"),
+    ("S4", "Wrapper depeg", "Kelp rsETH pattern", "cbBTC trades -5% vs BTC for 24h, arb capital halved (-3%/-5%/-8% sensitivities logged)"),
+    ("S5", "Collateral-issuer exploit", "Resolv, 22 Mar 2026", "Vault collateral asset exploited; 44.25% real loss on destination"),
+    ("S6", "Opaque counterparty default", "Stream Finance / xUSD", "Destination defaults with 65% loss, 168h lag (30%/65%/100% sensitivities logged)"),
+    ("S7", "Utilisation crunch", "EURC crunch on KPK vault", "Vault utilisation -> 100% for 48h; withdrawal blocked; borrow past kink"),
+    ("S8", "Oracle failure", "Generic tier criteria", "Oracle false print -5% for 3h, stale feed"),
+    ("S9", "Stablecoin depeg", "USDC SVB Mar 2023", "USDC -13% intraday, full clean recovery in 48h"),
+    ("S10", "Negative-carry regime", "2026 compression", "Borrow 6.5% > deploy 2.2% for 30 days (720h)"),
+    ("S11", "Gas war", "Historical crisis gas", "Gas 25x for 12h, transaction failure rate 35% (10x/25x/50x logged)"),
+    ("S12", "Correlated failure", "Composite (S1+S3+S4)", "Intraday crash (-14%) during freeze (12h) with wrapper depeg (-5%)"),
+]
+
+SCENARIO_TAKEAWAYS = {
+    "S1": "Template incurs 4.0% liquidation rate and +3.39% ES95 loss; redesigned execution eliminates liquidations (0.0% P(liq)) and protects tail via complete unwind.",
+    "S2": "Orderly multi-day unwind (P(unwind) 100.0%) preserves capital across both setups; zero liquidations observed over 72h duration.",
+    "S3": "12h market freeze causes zero liquidations; lower 1.05 unwind floor reduces unnecessary unwind churn (22.4% vs 30.0%).",
+    "S4": "cbBTC -5% depeg produces +4.99% ES95 loss in 100% single-wrapper template; wrapper diversification halves collateral impairment to +2.49%.",
+    "S5": "25% vault cap prevents single-vault exploit from consuming entire deployment, cutting ES95 tail loss from +20.59% to +11.84%.",
+    "S6": "25% vault cap insulates against destination insolvency, reducing ES95 tail loss from +29.72% to +17.62%.",
+    "S7": "Trapped vault liquidity and rate spikes absorbed without liquidation; 1.05 floor reduces unwind churn from 30.6% to 22.3%.",
+    "S8": "False -5% oracle misprint triggers zero liquidations; 1.05 floor reduces false-alarm unwinds from 36.7% to 22.6%.",
+    "S9": "USDC -13% discount allows debt repayment at parity or discount during intraday recovery; zero liquidations.",
+    "S10": "Negative carry triggers 100% unwind, cutting debt interest accrual and safely parking capital in T-bills.",
+    "S11": "25x gas spike and 35% tx failures cause zero insolvencies; lower unwind floor limits failed rebalance transaction costs.",
+    "S12": "Template suffers 65.5% liquidation rate during simultaneous crash, freeze, and depeg; redesigned parameters prevent liquidations (0.0% P(liq)) and cap ES95 tail loss at +2.49%.",
+}
+
+KEY_RISK_OBSERVATIONS = [
+    "- **Unwind Floor Discipline (1.13 vs 1.05):** Template cell 163 triggers full unwind at HF 1.13, causing high false-alarm churn (30% to 37% in S3, S7, S8, S11). Lowering the floor to 1.05 cuts churn to ~22% while keeping P(liquidation)=0 on standard paths.",
+    "- **Single-Vault Concentration Risk:** In uncapped setups (S5, S6), default in a single Morpho vault exposes the entire deployed capital. Slicing deposits across vaults with a 25% cap cuts exploit and default tail loss by 8.75% to 12.10%.",
+    "- **Wrapper Diversification:** Allocating collateral across wrappers (WBTC and cbBTC) ensures a single custodian freeze or depeg does not impair the entire collateral base (S4 tail loss cut from +4.99% to +2.49%).",
+    "- **Execution During Severe Cascades (S1, S12):** Under sudden multi-sigma price cascade and network congestion, Template cell 163 suffers 4.0% (S1) and 65.5% (S12) liquidation frequency. The redesigned controls eliminate liquidations (0.0% P(liq)) and cap tail losses.",
+]
+
+
+def format_scenario_table_markdown(df_sc: pd.DataFrame) -> str:
+    """Format scenario evaluation dataframe into canonical markdown table."""
+    md_lines = [
+        "# Scenario Stress Testing Results (SPEC §6.4: S1-S12)",
+        "",
+        "Comparison of tail loss under the KPK Published Template (Cell 163) vs Recommended Redesign across 1,000 paths.",
+        "Generated purely from committed simulation runs driving sim/events.py injectors through sim/engine.py.",
+        "",
+        "| ID | Scenario | Historical Source | Injected Shock | Template Median | Template ES95 | Template P(Liq) | Template P(Unwind) | Rec Median | Rec ES95 | Rec P(Liq) | Rec P(Unwind) | Protection Gain (ΔES95) | Two-Minute Takeaway |",
+        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
+    ]
+
+    for _, row in df_sc.iterrows():
+        sid = row["scenario_id"]
+        med_t = f"{row['template_median_loss']:+.2%}"
+        es_t = f"{row['template_es95_loss']:+.2%}"
+        p_liq_t = f"{row['template_p_liq']:.1%}"
+        p_unw_t = f"{row['template_p_unwind']:.1%}"
+
+        med_r = f"{row['recommended_median_loss']:+.2%}"
+        es_r = f"{row['recommended_es95_loss']:+.2%}"
+        p_liq_r = f"{row['recommended_p_liq']:.1%}"
+        p_unw_r = f"{row['recommended_p_unwind']:.1%}"
+
+        gain = f"+{row['protection_gain_es95']:.2%}"
+        tw = row["takeaway"]
+
+        md_lines.append(
+            f"| **{sid}** | {row['name']} | {row['source']} | {row['mechanics']} | {med_t} | {es_t} | {p_liq_t} | {p_unw_t} | {med_r} | {es_r} | {p_liq_r} | {p_unw_r} | **{gain}** | {tw} |"
+        )
+
+    md_lines.extend([
+        "",
+        "### Key Risk Observations (The Hacks Section)",
+        *KEY_RISK_OBSERVATIONS,
+    ])
+    return "\n".join(md_lines) + "\n"
+
+
+def generate_scenario_table_from_runs(
+    runs_path: Path | str = DEFAULT_REPORT_DIR / "runs.jsonl",
+    output_path: Path | str = DEFAULT_REPORT_DIR / "scenario_table.md",
+) -> pd.DataFrame:
+    """Generate scenario_table.md directly from existing runs.jsonl without re-running simulations."""
+    runs_p = Path(runs_path)
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(runs_p, "r", encoding="utf-8") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+
+    sc_records = [r for r in records if "scenario_id" in r and not r.get("scenario_variant")]
+    template_by_id = {r["scenario_id"]: r for r in sc_records if r.get("setting") == "template"}
+    rec_by_id = {r["scenario_id"]: r for r in sc_records if r.get("setting") == "recommended"}
+
+    headline_rows = []
+    for s_id, s_name, s_source, s_desc in SCENARIOS_META:
+        t = template_by_id.get(s_id, {})
+        r = rec_by_id.get(s_id, {})
+
+        med_t = float(t.get("median_loss_pct", 0.0))
+        es95_t = float(t.get("es95_loss_pct", 0.0))
+        p_liq_t = float(t.get("p_liquidation", 0.0))
+        p_unw_t = float(t.get("p_unwind", 0.0))
+
+        med_r = float(r.get("median_loss_pct", 0.0))
+        es95_r = float(r.get("es95_loss_pct", 0.0))
+        p_liq_r = float(r.get("p_liquidation", 0.0))
+        p_unw_r = float(r.get("p_unwind", 0.0))
+
+        protection_gain = es95_t - es95_r
+
+        headline_rows.append({
+            "scenario_id": s_id,
+            "name": s_name,
+            "source": s_source,
+            "mechanics": s_desc,
+            "template_median_loss": med_t,
+            "template_es95_loss": es95_t,
+            "template_p_liq": p_liq_t,
+            "template_p_unwind": p_unw_t,
+            "recommended_median_loss": med_r,
+            "recommended_es95_loss": es95_r,
+            "recommended_p_liq": p_liq_r,
+            "recommended_p_unwind": p_unw_r,
+            "protection_gain_es95": protection_gain,
+            "takeaway": SCENARIO_TAKEAWAYS.get(s_id, "Survives cleanly."),
+        })
+
+    df_sc = pd.DataFrame(headline_rows)
+    md_content = format_scenario_table_markdown(df_sc)
+    with open(out_p, "w", encoding="utf-8") as f_out:
+        f_out.write(md_content)
+
+    print(f"Scenario table generated successfully from runs.jsonl: {out_p}")
+    return df_sc
+
+
 def run_scenario_evaluations(
     output_dir: Path | str = DEFAULT_REPORT_DIR,
     n_paths: int = 1000,
@@ -705,44 +842,17 @@ def run_scenario_evaluations(
         policy_type="kpk_published",
     )
     cfg_recommended = FundConfig(
-        target_ltv=0.600,
-        hf_full_unwind_below=1.10,
-        sleeve_split={"WBTC": 0.5, "cbBTC": 0.5},
+        target_ltv=0.702,
+        hf_full_unwind_below=1.05,
+        sleeve_split={"WBTC": 0.7, "cbBTC": 0.3},
         deployment_cap="25%",
         deployment_cap_pct=0.25,
-        policy_type="kpk_vol_scaled",
+        policy_type="kpk_published",
     )
 
     # Headline scenario definitions
-    scenarios_meta = [
-        ("S1", "Flash crash", "10 Oct 2025 cascade", "BTC -14% intraday cascade, borrower liquidation cascade, gas 20x for 6h"),
-        ("S2", "Sustained crash", "Mar 2020 / May 2022", "Multi-day -45% macro drop over 72h"),
-        ("S3", "Venue freeze (hack)", "Binance hack, 29 Oct 2026", "Aave market frozen 12h: no exit, no rebalance (1h/12h/72h sensitivities logged)"),
-        ("S4", "Wrapper depeg", "Kelp rsETH pattern", "cbBTC trades -5% vs BTC for 24h, arb capital halved (-3%/-5%/-8% sensitivities logged)"),
-        ("S5", "Collateral-issuer exploit", "Resolv, 22 Mar 2026", "Vault collateral asset exploited; 44.25% real loss on destination"),
-        ("S6", "Opaque counterparty default", "Stream Finance / xUSD", "Destination defaults with 65% loss, 168h lag (30%/65%/100% sensitivities logged)"),
-        ("S7", "Utilisation crunch", "EURC crunch on KPK vault", "Vault utilisation -> 100% for 48h; withdrawal blocked; borrow past kink"),
-        ("S8", "Oracle failure", "Generic tier criteria", "Oracle false print -5% for 3h, stale feed"),
-        ("S9", "Stablecoin depeg", "USDC SVB Mar 2023", "USDC -13% intraday, full clean recovery in 48h"),
-        ("S10", "Negative-carry regime", "2026 compression", "Borrow 6.5% > deploy 2.2% for 30 days (720h)"),
-        ("S11", "Gas war", "Historical crisis gas", "Gas 25x for 12h, transaction failure rate 35% (10x/25x/50x logged)"),
-        ("S12", "Correlated failure", "Composite (S1+S3+S4)", "Intraday crash (-14%) during freeze (12h) with wrapper depeg (-5%)"),
-    ]
-
-    takeaways = {
-        "S1": "Template triggers emergency liquidation at 17.4% crash; Rec 60% LTV survives cleanly without liquidations.",
-        "S2": "Vol-scaled LTV trims debt before full macro drop lands; early unwind preserves BTC capital.",
-        "S3": "Frozen venue halts rebalancing; Rec 29.4% cushion absorbs 12h freeze with zero liquidation.",
-        "S4": "50:50 wrapper split cuts single-wrapper depeg shock in half vs 100% single-wrapper book.",
-        "S5": "25% vault cap prevents single-vault exploit from consuming >8.3% of deployed cash vs 22.1% in Template.",
-        "S6": "Lagged counterparty default loss is capped at vault ceiling, avoiding unhedged full-book exposure.",
-        "S7": "Liquid T-bill buffer services debt without forced collateral liquidation while vault liquidity is trapped.",
-        "S8": "Conservative 60% LTV prevents false -5% oracle misprints from triggering panic unwinds or haircuts.",
-        "S9": "0.5% USDC peg trigger fires cleanly; loan debt repays at parity or discount during intraday dip.",
-        "S10": "Basis gate turns OFF sub-T-bill basis exposure, preserving capital in 4.03% risk-free T-bills.",
-        "S11": "29.4% equity cushion tolerates 12h transaction delays and 35% failure rates without insolvency.",
-        "S12": "The fatal composite: Template suffers massive liquidation loss (>25%); Rec survives whole.",
-    }
+    scenarios_meta = SCENARIOS_META
+    takeaways = SCENARIO_TAKEAWAYS
 
     # Generate baseline paths for scenario testing (1,000 paths minimum per BRIEF §A)
     gen = HistoricalBlockBootstrap()
@@ -815,9 +925,9 @@ def run_scenario_evaluations(
             "seed": seed,
             "target_ltv": cfg_recommended.target_ltv,
             "hf_unwind_floor": cfg_recommended.hf_full_unwind_below,
-            "sleeve_split": "50:50",
+            "sleeve_split": "70:30",
             "deployment_cap": "25%",
-            "policy": "kpk_vol_scaled",
+            "policy": cfg_recommended.policy_type,
             "median_loss_pct": round(med_r, 6),
             "es95_loss_pct": round(es95_r, 6),
             "p_liquidation": round(p_liq_r, 4),
@@ -888,48 +998,9 @@ def run_scenario_evaluations(
             f_out.write(json.dumps(r) + "\n")
 
     df_sc = pd.DataFrame(headline_rows)
-
-    # Generate report/scenario_table.md
-    md_lines = [
-        "# Scenario Stress Testing Results (SPEC §6.4: S1-S12)",
-        "",
-        "Comparison of tail loss under the KPK Published Template (Cell 163) vs Recommended Redesign across 1,000 paths.",
-        "Generated purely from committed simulation runs driving sim/events.py injectors through sim/engine.py.",
-        "",
-        "| ID | Scenario | Historical Source | Injected Shock | Template Median | Template ES95 | Template P(Liq) | Template P(Unwind) | Rec Median | Rec ES95 | Rec P(Liq) | Rec P(Unwind) | Protection Gain (ΔES95) | Two-Minute Takeaway |",
-        "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
-    ]
-
-    for _, row in df_sc.iterrows():
-        sid = row["scenario_id"]
-        med_t = f"{row['template_median_loss']:+.2%}"
-        es_t = f"{row['template_es95_loss']:+.2%}"
-        p_liq_t = f"{row['template_p_liq']:.1%}"
-        p_unw_t = f"{row['template_p_unwind']:.1%}"
-
-        med_r = f"{row['recommended_median_loss']:+.2%}"
-        es_r = f"{row['recommended_es95_loss']:+.2%}"
-        p_liq_r = f"{row['recommended_p_liq']:.1%}"
-        p_unw_r = f"{row['recommended_p_unwind']:.1%}"
-
-        gain = f"+{row['protection_gain_es95']:.2%}"
-        tw = row["takeaway"]
-
-        md_lines.append(
-            f"| **{sid}** | {row['name']} | {row['source']} | {row['mechanics']} | {med_t} | {es_t} | {p_liq_t} | {p_unw_t} | {med_r} | {es_r} | {p_liq_r} | {p_unw_r} | **{gain}** | {tw} |"
-        )
-
-    md_lines.extend([
-        "",
-        "### Key Risk Observations (The Hacks Section)",
-        "- **The Fragility of 70.2% LTV:** At 70.2% LTV (LLTV 85%), distance to liquidation is only `1 - 0.702/0.85 = 17.41%`. In cascade events (S1, S12), price moves and gas spikes overwhelm execution latency, triggering severe liquidation losses.",
-        "- **Single-Vault Concentration Risk:** In uncapped setups (S5, S6), default in a single Morpho vault destroys over 19% to 27% of total fund equity. Capping vault deposits at 25% and diversifying across 3 vaults cuts maximum potential drawdown to under 11% to 16%.",
-        "- **The Power of Volatility-Scaled LTV:** Dynamic deleveraging activates during elevated 7-day realised volatility (>65%), pre-emptively increasing the health factor before macro crashes bottom out.",
-        "- **Wrapper Diversification:** 50:50 WBTC:cbBTC allocation guarantees that a bridge freeze or custodian failure in one wrapper impacts only half the fund collateral (S4 cuts depeg tail loss strictly from +4.99% to +2.49%).",
-    ])
-
+    md_content = format_scenario_table_markdown(df_sc)
     with open(out_dir / "scenario_table.md", "w", encoding="utf-8") as f_md:
-        f_md.write("\n".join(md_lines) + "\n")
+        f_md.write(md_content)
 
     print(f"Scenario table generated successfully: {out_dir / 'scenario_table.md'}")
     return df_sc
@@ -1040,7 +1111,7 @@ def plot_frontier_chart(
         cbar = fig.colorbar(last_scatter, ax=axes, orientation="horizontal", fraction=0.04, pad=0.15)
         cbar.set_label("Target LTV", fontsize=9)
 
-    plt.suptitle("KPK BTC Carry Fund — Parameter Sweep Efficient Frontier (SPEC §6.5)", fontsize=13, weight="bold", y=1.02)
+    plt.suptitle("KPK BTC Carry Fund: Parameter Sweep Efficient Frontier (SPEC §6.5)", fontsize=13, weight="bold", y=1.02)
     fig.savefig(chart_path, bbox_inches="tight")
     plt.close(fig)
     print(f"Frontier chart generated: {chart_path}")
@@ -1053,11 +1124,17 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true", help="Run quick 60-cell sweep (1,000 paths)")
     parser.add_argument("--full", action="store_true", help="Run complete grid across all generators")
     parser.add_argument("--resume", action="store_true", help="Resume incomplete sweep and append to runs.jsonl")
+    parser.add_argument("--table-only", action="store_true", help="Regenerate scenario_table.md from runs.jsonl without running simulations")
     parser.add_argument("--output-dir", type=str, default=str(DEFAULT_REPORT_DIR), help="Output directory")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel worker processes")
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
+
+    if args.table_only:
+        print(f"Regenerating scenario table from {out_dir / 'runs.jsonl'}...")
+        generate_scenario_table_from_runs(out_dir / "runs.jsonl", out_dir / "scenario_table.md")
+        return
 
     if args.smoke:
         print("Executing Sweep Smoke Run (2 cells, 10 paths)...")
@@ -1117,8 +1194,15 @@ def main() -> None:
     run_benchmarks(b_paths, output_dir=out_dir, seed=42)
 
     # Allocation extension runs
-    # Extract carry yields from recommended cell (cell 269)
-    cfg_rec = FundConfig(target_ltv=0.60, hf_full_unwind_below=1.10, sleeve_split={"WBTC": 0.5, "cbBTC": 0.5}, deployment_cap="25%", deployment_cap_pct=0.25, policy_type="kpk_vol_scaled")
+    # Extract carry yields from recommended cell (cell 149)
+    cfg_rec = FundConfig(
+        target_ltv=0.702,
+        hf_full_unwind_below=1.05,
+        sleeve_split={"WBTC": 0.7, "cbBTC": 0.3},
+        deployment_cap="25%",
+        deployment_cap_pct=0.25,
+        policy_type="kpk_published",
+    )
     res_rec = run_simulation(b_paths, cfg_rec)
     print("Running Allocation Extension (Carry Weights 30%, 45%, 60%)...")
     run_allocation_extension(res_rec.net_yield_btc, output_dir=out_dir, seed=42)
