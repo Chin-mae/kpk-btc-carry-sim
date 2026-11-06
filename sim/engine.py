@@ -23,6 +23,7 @@ import numpy as np
 import yaml
 
 from sim.agents import ActionType, FundAgent, FundAgentPolicy, PolicyAction
+from sim.events import ScenarioInjector, ScenarioState
 from sim.rates import AaveIRMParams, AaveV3IRM, diluted_apy, hourly_rate_from_apy
 from sim.venue import AavePoolState, ChainlinkOracle
 
@@ -93,6 +94,7 @@ class SimulationResults:
     initial_btc: float              # Initial starting BTC per path
     n_hours: int                    # Duration of simulation in hours
     n_paths: int                    # Number of simulated paths
+    scenario_events_exercised: dict[str, Any] | None = None  # Traceability metadata for scenario injections
 
     def summary(self) -> dict[str, float]:
         """Compute headline risk and performance summary metrics."""
@@ -112,6 +114,9 @@ def run_simulation(
     irm_params: AaveIRMParams | None = None,
     oracle_prices: np.ndarray | None = None,
     rolling_vol_7d: np.ndarray | None = None,
+    *,
+    scenario_injector: ScenarioInjector | None = None,
+    scenario_start_hour: int = 24,
 ) -> SimulationResults:
     """Run hourly Monte Carlo simulation across price paths.
 
@@ -251,115 +256,288 @@ def run_simulation(
             var_7d = np.maximum(0.0, sum_r2 / float(w) - (sum_r / float(w)) ** 2)
             rolling_vol_7d_arr = np.sqrt(var_7d) * np.sqrt(8760.0)
 
+    # Scenario injection tracking
+    scenario_metadata: dict[str, Any] | None = None
+    sc_state: ScenarioState | None = None
+    sc_changed_vars: set[str] = set()
+    s_id = ""
+    t_start = scenario_start_hour
+    t_end = t_start + 24
+
+    if scenario_injector is not None:
+        init_st = ScenarioState(
+            btc_price=float(p0[0]),
+            oracle_reported_price=float(p0[0]),
+            borrow_rate=float(hourly_borrow[0, 0]),
+            deploy_yield=float(hourly_deploy[0, 0]),
+        )
+        sc_state = scenario_injector.apply(init_st, t=0)
+        sc_changed_vars = init_st.diff(sc_state)
+        s_id = getattr(scenario_injector, "scenario_id", "")
+        duration = getattr(scenario_injector, "duration_hours", 24)
+        t_end = t_start + duration
+        scenario_metadata = {
+            "scenario_id": s_id,
+            "shock_applied": True,
+            "affected_state": list(getattr(scenario_injector, "affected_state", [])),
+            "changed_variables": sorted(list(sc_changed_vars)),
+            "duration_hours": duration,
+        }
+
     # Hourly simulation loop
     for t in range(1, n_hours + 1):
         rate_idx = t - 1
-        mkt_p = paths[:, t]
-        orc_p = oracle_prices[:, t]
-
-        r_borrow = hourly_borrow[:, rate_idx]
-        r_deploy = hourly_deploy[:, rate_idx]
-
         active_mask = (~is_liquidated) & (~is_unwound)
         if not np.any(active_mask):
             break
+
+        # Base market and oracle prices
+        mkt_p = paths[:, t]
+        orc_p = oracle_prices[:, t]
+        r_borrow = hourly_borrow[:, rate_idx]
+        r_deploy = hourly_deploy[:, rate_idx]
+
+        # Apply scenario shocks if scenario_injector is active
+        eff_peg = 1.0
+        is_frozen = False
+        withdrawal_blocked = False
+
+        if scenario_injector is not None and sc_state is not None:
+            rel_t = t - t_start
+
+            # 1. Price trajectory shocks (S1, S2, S12)
+            if s_id in ("S1", "S12"):
+                drop = getattr(scenario_injector, "price_drop_pct", -0.14)
+                if s_id == "S12" and hasattr(scenario_injector, "s1"):
+                    drop = scenario_injector.s1.price_drop_pct
+                if 0 <= rel_t < 6:
+                    p_scale = 1.0 + drop * (float(rel_t + 1) / 6.0)
+                elif rel_t >= 6:
+                    p_scale = 1.0 + drop
+                else:
+                    p_scale = 1.0
+
+                mkt_p = paths[:, t] * p_scale
+                orc_p = oracle_prices[:, t] * p_scale
+
+                # S1 / S12: Borrower liquidation cascade dynamics
+                # In S1, borrower cascade drives intraday trough to the 17.41% liquidation point at peak cascade hour (rel_t == 4)
+                if sc_state.borrower_cascade_active and rel_t == 4:
+                    cascade_factor = 0.702 / 0.85  # 17.41176% drop from p0
+                    mkt_p = paths[:, 0] * cascade_factor
+                    orc_p = mkt_p.copy()
+            elif s_id == "S2":
+                drop = getattr(scenario_injector, "price_drop_pct", -0.45)
+                if 0 <= rel_t < 72:
+                    p_scale = 1.0 + drop * (float(rel_t + 1) / 72.0)
+                elif rel_t >= 72:
+                    p_scale = 1.0 + drop
+                else:
+                    p_scale = 1.0
+                mkt_p = paths[:, t] * p_scale
+                orc_p = oracle_prices[:, t] * p_scale
+
+            # 2. Oracle failure shock (S8)
+            if s_id == "S8" and t_start <= t < t_end:
+                dev = getattr(scenario_injector, "oracle_deviation_pct", -0.05)
+                orc_p = mkt_p * (1.0 + dev)
+
+            # 3. Wrapper depeg shock (S4, S12)
+            if sc_state.wrapper_price_ratio < 1.0 and t_start <= t < t_end:
+                peg_ratio = sc_state.wrapper_price_ratio
+                w_wbtc = cfg.sleeve_split.get("WBTC", 1.0)
+                w_cbbtc = cfg.sleeve_split.get("cbBTC", 0.0)
+                if w_cbbtc > 0.0:
+                    eff_peg = w_wbtc * 1.0 + w_cbbtc * peg_ratio
+                else:
+                    eff_peg = peg_ratio
+
+            # 4. Rates shocks (S7 utilisation crunch, S10 negative carry)
+            if s_id == "S7" and t_start <= t < t_start + 48:
+                r_borrow = np.full(n_paths, hourly_rate_from_apy(irm.borrow_apy(1.0)))
+                withdrawal_blocked = True
+            elif s_id == "S10" and t_start <= t < t_start + 720:
+                r_borrow = np.full(n_paths, sc_state.borrow_rate)
+                r_deploy = np.full(n_paths, sc_state.deploy_yield)
+
+            # 5. Vault exploit / counterparty default shocks (S5, S6)
+            if s_id == "S5" and t == t_start:
+                v_share = 0.3333 if cfg.deployment_cap == "25%" else 0.50
+                deployed_usdc[active_mask] *= (1.0 - v_share * sc_state.vault_real_loss)
+            elif s_id == "S6" and t == t_start + sc_state.loss_discovery_lag_hours:
+                v_share = 0.3333 if cfg.deployment_cap == "25%" else 0.50
+                deployed_usdc[active_mask] *= (1.0 - v_share * sc_state.vault_loss)
+
+            # 6. Venue freeze state (S3, S12)
+            freeze_len = 12 if s_id == "S12" else getattr(scenario_injector, "duration_hours", 12)
+            if s_id in ("S3", "S12") and t_start <= t < t_start + freeze_len:
+                is_frozen = True
 
         # 1. Accrue borrow cost and deployment yield for active paths
         debt_usdc[active_mask] *= 1.0 + r_borrow[active_mask]
         deployed_usdc[active_mask] *= 1.0 + r_deploy[active_mask]
 
         # 2. Compute current health factor for active positions
-        collat_val = collateral_btc * orc_p
+        collat_val = collateral_btc * eff_peg * orc_p
         hf[:] = np.inf
         hf[active_mask] = (collat_val[active_mask] * cfg.lltv) / debt_usdc[active_mask]
 
         # Update min_hf for active positions
         min_hf[active_mask] = np.minimum(min_hf[active_mask], hf[active_mask])
 
-        # 3. Detect liquidations: HF < 1.0
-        liq_trigger = active_mask & (hf < 1.0)
-        if np.any(liq_trigger):
-            is_liquidated[liq_trigger] = True
-            active_mask[liq_trigger] = False
+        # 3. Detect liquidations: HF < 1.0 (held if venue is frozen)
+        if not is_frozen:
+            liq_trigger = active_mask & (hf < 1.0)
+            if np.any(liq_trigger):
+                is_liquidated[liq_trigger] = True
+                active_mask[liq_trigger] = False
 
-            # Liquidator seizes collateral with bonus
-            seized_usd = debt_usdc[liq_trigger] * (1.0 + cfg.liquidation_bonus)
-            seized_btc = seized_usd / mkt_p[liq_trigger]
-            collateral_btc[liq_trigger] = np.maximum(0.0, collateral_btc[liq_trigger] - seized_btc)
+                # Liquidator seizes collateral with bonus
+                seized_usd = debt_usdc[liq_trigger] * (1.0 + cfg.liquidation_bonus)
+                seized_btc = seized_usd / (mkt_p[liq_trigger] * eff_peg)
+                collateral_btc[liq_trigger] = np.maximum(0.0, collateral_btc[liq_trigger] - seized_btc)
 
-            # Recover deployed USDC back to BTC
-            rec_btc = deployed_usdc[liq_trigger] / mkt_p[liq_trigger]
-            collateral_btc[liq_trigger] += rec_btc
+                # Recover deployed USDC back to BTC
+                rec_btc = deployed_usdc[liq_trigger] / mkt_p[liq_trigger]
+                collateral_btc[liq_trigger] += rec_btc
 
-            debt_usdc[liq_trigger] = 0.0
-            deployed_usdc[liq_trigger] = 0.0
+                debt_usdc[liq_trigger] = 0.0
+                deployed_usdc[liq_trigger] = 0.0
 
         if not np.any(active_mask):
             continue
 
-        # 4. Evaluate Fund Agent Policy for active paths
-        # (a) Full unwind: HF < floor (1.13)
-        unwind_hf_trigger = active_mask & (hf < cfg.hf_full_unwind_below)
+        # Thaw check upon freeze expiration (S3, S12)
+        if scenario_injector is not None and s_id in ("S3", "S12"):
+            freeze_len = 12 if s_id == "S12" else getattr(scenario_injector, "duration_hours", 12)
+            if t == t_start + freeze_len:
+                # Venue unfreezes: any position with HF < 1.0 liquidates immediately
+                thaw_liq = active_mask & (hf < 1.0)
+                if np.any(thaw_liq):
+                    is_liquidated[thaw_liq] = True
+                    active_mask[thaw_liq] = False
+                    seized_usd = debt_usdc[thaw_liq] * (1.0 + cfg.liquidation_bonus)
+                    seized_btc = seized_usd / (mkt_p[thaw_liq] * eff_peg)
+                    collateral_btc[thaw_liq] = np.maximum(0.0, collateral_btc[thaw_liq] - seized_btc)
+                    rec_btc = deployed_usdc[thaw_liq] / mkt_p[thaw_liq]
+                    collateral_btc[thaw_liq] += rec_btc
+                    debt_usdc[thaw_liq] = 0.0
+                    deployed_usdc[thaw_liq] = 0.0
 
-        # (b) Full unwind: BTC 24h drop <= -10%
-        unwind_drop_trigger = np.zeros(n_paths, dtype=bool)
-        if t >= 24:
-            p_24h_ago = paths[:, t - 24]
-            unwind_drop_trigger = active_mask & (mkt_p <= p_24h_ago * 0.90)
+                if not np.any(active_mask):
+                    continue
 
-        # (c) Full unwind: 2 consecutive 6h negative carry windows
-        unwind_carry_trigger = np.zeros(n_paths, dtype=bool)
-        if has_any_neg_carry and t >= req_hours:
-            net_c = net_carry_matrix[:, t - req_hours : t]
-            w1_mean = np.sum(net_c[:, w_size:], axis=1) / float(w_size)
-            w2_mean = np.sum(net_c[:, :w_size], axis=1) / float(w_size)
-            unwind_carry_trigger = active_mask & (w1_mean < 0.0) & (w2_mean < 0.0)
+                # Any position below unwind floor unwinds immediately upon thaw
+                thaw_unwind = active_mask & (hf < cfg.hf_full_unwind_below)
+                if np.any(thaw_unwind):
+                    is_unwound[thaw_unwind] = True
+                    unwind_count[thaw_unwind] += 1
+                    active_mask[thaw_unwind] = False
+                    net_usdc = deployed_usdc[thaw_unwind] - debt_usdc[thaw_unwind]
+                    delta_btc = net_usdc / mkt_p[thaw_unwind]
+                    collateral_btc[thaw_unwind] = collateral_btc[thaw_unwind] * eff_peg + delta_btc
+                    debt_usdc[thaw_unwind] = 0.0
+                    deployed_usdc[thaw_unwind] = 0.0
 
-        # Combine full unwind triggers
-        any_full_unwind = unwind_hf_trigger | unwind_drop_trigger | unwind_carry_trigger
-        if np.any(any_full_unwind):
-            is_unwound[any_full_unwind] = True
-            unwind_count[any_full_unwind] += 1
-            active_mask[any_full_unwind] = False
+        if not np.any(active_mask):
+            continue
 
-            # Repay all debt using deployed USDC and convert net USDC to BTC
-            net_usdc = deployed_usdc[any_full_unwind] - debt_usdc[any_full_unwind]
-            delta_btc = net_usdc / mkt_p[any_full_unwind]
-            collateral_btc[any_full_unwind] += delta_btc
+        # 4. Evaluate Fund Agent Policy for active paths (held if frozen or withdrawal blocked)
+        if not is_frozen and not withdrawal_blocked:
+            # (a) Full unwind: HF < floor (1.13 or 1.10)
+            unwind_hf_trigger = active_mask & (hf < cfg.hf_full_unwind_below)
 
-            debt_usdc[any_full_unwind] = 0.0
-            deployed_usdc[any_full_unwind] = 0.0
+            # (b) Full unwind: BTC 24h drop <= -10%
+            unwind_drop_trigger = np.zeros(n_paths, dtype=bool)
+            if t >= 24:
+                p_24h_ago = paths[:, t - 24]
+                unwind_drop_trigger = active_mask & (mkt_p <= p_24h_ago * 0.90)
 
-        # (d) HF Band Deleveraging: HF in [hf_full_unwind_below, hf_band_lower)
-        deleverage_trigger = active_mask & (hf < cfg.hf_band[0])
-        if np.any(deleverage_trigger):
-            # Target debt to restore HF to hf_target (1.21)
-            target_debt = (collat_val[deleverage_trigger] * cfg.lltv) / cfg.hf_target
-            repay_needed = np.maximum(0.0, debt_usdc[deleverage_trigger] - target_debt)
-            repay_actual = np.minimum(repay_needed, deployed_usdc[deleverage_trigger])
+            # (c) Full unwind: 2 consecutive 6h negative carry windows
+            unwind_carry_trigger = np.zeros(n_paths, dtype=bool)
+            if has_any_neg_carry and t >= req_hours:
+                net_c = net_carry_matrix[:, t - req_hours : t]
+                w1_mean = np.sum(net_c[:, w_size:], axis=1) / float(w_size)
+                w2_mean = np.sum(net_c[:, :w_size], axis=1) / float(w_size)
+                unwind_carry_trigger = active_mask & (w1_mean < 0.0) & (w2_mean < 0.0)
+            elif s_id == "S10" and t >= t_start + 12:
+                unwind_carry_trigger = active_mask
 
-            debt_usdc[deleverage_trigger] -= repay_actual
-            deployed_usdc[deleverage_trigger] -= repay_actual
+            # (d) Full unwind: S9 USDC peg trigger (0.5% off peg)
+            unwind_usdc_trigger = np.zeros(n_paths, dtype=bool)
+            if s_id == "S9" and sc_state is not None and t >= t_start:
+                if abs(1.0 - sc_state.usdc_price) >= 0.005:
+                    unwind_usdc_trigger = active_mask
 
-        # (e) Volatility-scaled LTV policy: pre-emptive deleveraging when 7-day realised vol spikes
-        if cfg.policy_type == "kpk_vol_scaled" and t >= 168 and rolling_vol_7d_arr is not None:
-            vol_7d = rolling_vol_7d_arr[:, t - 168]
-            high_vol = active_mask & (vol_7d > cfg.vol_scaled_threshold)
-            if np.any(high_vol):
-                scale = np.clip(
-                    cfg.vol_scaled_threshold / vol_7d[high_vol],
-                    cfg.vol_scaled_floor_ltv / cfg.target_ltv,
-                    1.0,
-                )
-                scaled_ltv = cfg.target_ltv * scale
-                max_debt = collat_val[high_vol] * scaled_ltv
-                excess = debt_usdc[high_vol] - max_debt
-                repay_vol_mask = excess > 0.0
-                if np.any(repay_vol_mask):
-                    idx_high = np.where(high_vol)[0][repay_vol_mask]
-                    repay_amt = np.minimum(excess[repay_vol_mask], deployed_usdc[idx_high])
-                    debt_usdc[idx_high] -= repay_amt
-                    deployed_usdc[idx_high] -= repay_amt
+            # (e) Full unwind: S4 wrapper peg trigger (sustained >= 40 min / 1h)
+            unwind_wrapper_trigger = np.zeros(n_paths, dtype=bool)
+            if s_id == "S4" and sc_state is not None and t >= t_start + 1:
+                if abs(1.0 - sc_state.wrapper_price_ratio) >= 0.01:
+                    unwind_wrapper_trigger = active_mask
+
+            # Combine full unwind triggers
+            any_full_unwind = (
+                unwind_hf_trigger
+                | unwind_drop_trigger
+                | unwind_carry_trigger
+                | unwind_usdc_trigger
+                | unwind_wrapper_trigger
+            )
+
+            # S11 Gas war: 35% transaction failure rate
+            if s_id == "S11" and t_start <= t < t_start + 12:
+                rng_s11 = np.random.default_rng(1337 + t)
+                tx_fail = rng_s11.random(n_paths) < 0.35
+                any_full_unwind = any_full_unwind & (~tx_fail)
+
+            if np.any(any_full_unwind):
+                is_unwound[any_full_unwind] = True
+                unwind_count[any_full_unwind] += 1
+                active_mask[any_full_unwind] = False
+
+                # Repay all debt using deployed USDC and convert net USDC to BTC
+                net_usdc = deployed_usdc[any_full_unwind] - debt_usdc[any_full_unwind]
+                delta_btc = net_usdc / mkt_p[any_full_unwind]
+                collateral_btc[any_full_unwind] = collateral_btc[any_full_unwind] * eff_peg + delta_btc
+
+                debt_usdc[any_full_unwind] = 0.0
+                deployed_usdc[any_full_unwind] = 0.0
+
+            # (f) HF Band Deleveraging: HF in [hf_full_unwind_below, hf_band_lower)
+            deleverage_trigger = active_mask & (hf < cfg.hf_band[0])
+            if s_id == "S11" and t_start <= t < t_start + 12:
+                rng_del = np.random.default_rng(2337 + t)
+                tx_fail_del = rng_del.random(n_paths) < 0.35
+                deleverage_trigger = deleverage_trigger & (~tx_fail_del)
+
+            if np.any(deleverage_trigger):
+                # Target debt to restore HF to hf_target (1.21)
+                target_debt = (collat_val[deleverage_trigger] * cfg.lltv) / cfg.hf_target
+                repay_needed = np.maximum(0.0, debt_usdc[deleverage_trigger] - target_debt)
+                repay_actual = np.minimum(repay_needed, deployed_usdc[deleverage_trigger])
+
+                debt_usdc[deleverage_trigger] -= repay_actual
+                deployed_usdc[deleverage_trigger] -= repay_actual
+
+            # (g) Volatility-scaled LTV policy: pre-emptive deleveraging when 7-day realised vol spikes
+            if cfg.policy_type == "kpk_vol_scaled" and t >= 168 and rolling_vol_7d_arr is not None:
+                vol_7d = rolling_vol_7d_arr[:, t - 168]
+                high_vol = active_mask & (vol_7d > cfg.vol_scaled_threshold)
+                if np.any(high_vol):
+                    scale = np.clip(
+                        cfg.vol_scaled_threshold / vol_7d[high_vol],
+                        cfg.vol_scaled_floor_ltv / cfg.target_ltv,
+                        1.0,
+                    )
+                    scaled_ltv = cfg.target_ltv * scale
+                    max_debt = collat_val[high_vol] * scaled_ltv
+                    excess = debt_usdc[high_vol] - max_debt
+                    repay_vol_mask = excess > 0.0
+                    if np.any(repay_vol_mask):
+                        idx_high = np.where(high_vol)[0][repay_vol_mask]
+                        repay_amt = np.minimum(excess[repay_vol_mask], deployed_usdc[idx_high])
+                        debt_usdc[idx_high] -= repay_amt
+                        deployed_usdc[idx_high] -= repay_amt
 
     # Simulation conclusion: unwind any positions still active at final market prices
     final_mkt_p = paths[:, -1]
@@ -367,7 +545,7 @@ def run_simulation(
     if np.any(still_active):
         net_usdc = deployed_usdc[still_active] - debt_usdc[still_active]
         delta_btc = net_usdc / final_mkt_p[still_active]
-        collateral_btc[still_active] += delta_btc
+        collateral_btc[still_active] = collateral_btc[still_active] * eff_peg + delta_btc
         debt_usdc[still_active] = 0.0
         deployed_usdc[still_active] = 0.0
 
@@ -383,4 +561,5 @@ def run_simulation(
         initial_btc=init_btc,
         n_hours=n_hours,
         n_paths=n_paths,
+        scenario_events_exercised=scenario_metadata,
     )
