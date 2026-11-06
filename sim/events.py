@@ -101,6 +101,19 @@ class ScenarioInjector:
         is_valid = (len(unexpected) == 0) and (len(missing) == 0)
         return is_valid, changed, unexpected
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize injector parameters to dictionary for deterministic config hashing."""
+        d: dict[str, Any] = {
+            "scenario_id": getattr(self, "scenario_id", ""),
+            "duration_hours": getattr(self, "duration_hours", 0),
+        }
+        for k, v in vars(self).items():
+            if isinstance(v, (int, float, str, bool)):
+                d[k] = v
+            elif isinstance(v, ScenarioInjector):
+                d[k] = v.to_dict()
+        return d
+
 
 # =====================================================================
 # S1–S11 INDIVIDUAL SCENARIOS
@@ -110,6 +123,8 @@ class S1FlashCrash(ScenarioInjector):
     """S1: Flash crash (10 Oct 2025 cascade).
 
     Mechanics: BTC -14% intraday path, borrower liquidation cascade, gas 20x for 6h.
+    The cascade trough is constructed to reach the template's theoretical liquidation boundary
+    (initial x 0.702/0.85, a 17.41% fall) at relative hour 4.
     Affected state: btc_price, borrower_cascade_active, gas_price_multiplier.
     """
 
@@ -176,15 +191,16 @@ class S3VenueFreeze(ScenarioInjector):
 
 
 class S4WrapperDepeg(ScenarioInjector):
-    """S4: Wrapper depeg (Kelp rsETH exploit pattern, 18 Apr 2026).
+    """S4: Held-wrapper depeg (Kelp rsETH exploit pattern, 18 Apr 2026).
 
-    Mechanics: cbBTC or WBTC trades -3% / -5% / -8% vs BTC for 6–48h;
-    arbitrageur capital halved; oracle still reads BTC price.
+    Mechanics: The shock impairs the held wrapper in proportion to its weight in the book.
+    Parameterised as cbBTC -3% / -5% / -8% vs BTC for 24h; for a 100:0 book the held wrapper is WBTC
+    (100% weight = full peg discount). Arbitrageur capital halved; oracle still reads BTC price.
     Affected state: wrapper_price_ratio, arbitrageur_capital_factor.
     """
 
     scenario_id = "S4"
-    name = "Wrapper depeg"
+    name = "Held-wrapper depeg"
     source = "Kelp rsETH exploit, 18 Apr 2026 (pattern)"
     affected_state = ["wrapper_price_ratio", "arbitrageur_capital_factor"]
     duration_hours = 24
@@ -301,9 +317,9 @@ class S7UtilisationCrunch(ScenarioInjector):
 
 
 class S8OracleFailure(ScenarioInjector):
-    """S8: Oracle failure (Generic, from KPK's own tier criteria).
+    """S8: Oracle failure (3-hour false -5% oracle print).
 
-    Mechanics: Oracle stale for 24h then -12% catch-up jump; or prints -5% wrong for 3h.
+    Mechanics: Oracle deviates -5% for exactly 3 hours, market price unaffected, then restores.
     Affected state: oracle_reported_price, oracle_stale.
     """
 
@@ -311,16 +327,18 @@ class S8OracleFailure(ScenarioInjector):
     name = "Oracle failure"
     source = "Generic, from KPK's own tier criteria"
     affected_state = ["oracle_reported_price", "oracle_stale"]
-    duration_hours = 24
+    duration_hours = 3
 
     def __init__(
         self,
         oracle_deviation_pct: float = -0.05,
         oracle_stale: bool = True,
+        duration_hours: int = 3,
         **kwargs: Any,
     ) -> None:
         self.oracle_deviation_pct = float(oracle_deviation_pct)
         self.oracle_stale = bool(oracle_stale)
+        self.duration_hours = int(duration_hours)
 
     def apply(self, state: ScenarioState, t: int = 0) -> ScenarioState:
         new_state = state.copy()
@@ -533,6 +551,7 @@ def load_scenario(scenario_id: str, yaml_path: Path | str | None = None) -> Scen
         return S8OracleFailure(
             oracle_deviation_pct=mag.get("false_print_pct", -0.05),
             oracle_stale=True,
+            duration_hours=mag.get("false_print_duration_hours", 3),
         )
     elif scenario_id == "S9":
         return S9StablecoinDepeg(usdc_trough_price=mag.get("usdc_trough_price", 0.87))

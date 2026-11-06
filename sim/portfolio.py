@@ -91,20 +91,108 @@ class CounterpartyTable:
         cls,
         total_fund_usd: float = 50_000_000.0,
         yaml_path: Path | str | None = None,
-        basis: str = "template",
+        basis: str = "selected",
     ) -> CounterpartyTable:
         """Create standard counterparty roster initialized to fund destinations.
         
         Args:
-            total_fund_usd: Total fund size in USD.
+            total_fund_usd: Total fund size in USD ($50M design scale).
             yaml_path: Optional path to config yaml.
-            basis: "template" for Phase 2 fund_template.yaml roster ($10M vault exposure),
-                   or "rebuilt" for Phase 3C multi-strategy fund equity roster ($4.5M vault).
+            basis: "selected" (default) for selected redesign cell 149 (70:30 split, 70.2% LTV -> $15.795M Morpho, $5.265M per vault),
+                   or "template" for KPK published template cell 163 (100:0 split, $10M vault exposure).
         """
         path = Path(yaml_path) if yaml_path is not None else DEFAULT_CONFIG_PATH
         entities: dict[str, Counterparty] = {}
 
-        if basis == "template":
+        if basis in ("selected", "rebuilt", "fund_equity"):
+            # Selected configuration (Cell 149): 45% carry sleeve ($22.5M), 70:30 WBTC:cbBTC, 70.2% LTV
+            # 1. Lending / Borrow Protocols
+            entities["aave_v3_core"] = Counterparty(
+                name="aave_v3_core",
+                category="lending_protocol",
+                current_exposure_usd=total_fund_usd * 0.45,  # $22.5M carry collateral / borrow venue
+                exposure_cap_usd=35_000_000.0,
+                loss_given_default=0.80,  # Assumed model parameter
+            )
+            entities["morpho"] = Counterparty(
+                name="morpho",
+                category="curation_protocol",
+                current_exposure_usd=total_fund_usd * 0.45 * 0.702,  # $15.795M borrowed USDC across vaults
+                exposure_cap_usd=25_000_000.0,
+                loss_given_default=0.85,  # Assumed model parameter
+            )
+            entities["gearbox"] = Counterparty(
+                name="gearbox",
+                category="lending_protocol",
+                current_exposure_usd=0.0,  # secondary venue, capacity constrained at design size
+                exposure_cap_usd=10_000_000.0,
+                loss_given_default=0.90,  # Assumed model parameter
+            )
+
+            # 2. Deployment Vaults: $15.795M borrow split across 3 vaults in equal thirds = $5.265M each
+            vault_dep = (total_fund_usd * 0.45 * 0.702) / 3.0
+            entities["kpk_usdc_yield_vault"] = Counterparty(
+                name="kpk_usdc_yield_vault",
+                category="deployment_vault",
+                current_exposure_usd=vault_dep,
+                exposure_cap_usd=12_500_000.0,
+                loss_given_default=0.65,  # Assumed model parameter
+            )
+            entities["kpk_usdc_yield_rwa_vault"] = Counterparty(
+                name="kpk_usdc_yield_rwa_vault",
+                category="deployment_vault",
+                current_exposure_usd=vault_dep,
+                exposure_cap_usd=12_500_000.0,
+                loss_given_default=0.65,  # Assumed model parameter
+            )
+            entities["yo_ecosystem_yousd"] = Counterparty(
+                name="yo_ecosystem_yousd",
+                category="deployment_vault",
+                current_exposure_usd=vault_dep,
+                exposure_cap_usd=12_500_000.0,
+                loss_given_default=0.65,  # Assumed model parameter
+            )
+
+            # 3. Asset Issuers & Custodians (70:30 WBTC:cbBTC on 45% sleeve = $15.75M / $6.75M)
+            entities["bitgo"] = Counterparty(
+                name="bitgo",
+                category="custodian",
+                current_exposure_usd=total_fund_usd * 0.45 * 0.70,  # 31.5% fund equity ($15.75M)
+                exposure_cap_usd=30_000_000.0,
+                loss_given_default=1.00,  # Assumed model parameter
+            )
+            entities["coinbase"] = Counterparty(
+                name="coinbase",
+                category="asset_issuer",
+                current_exposure_usd=total_fund_usd * 0.45 * 0.30,  # 13.5% fund equity ($6.75M)
+                exposure_cap_usd=20_000_000.0,
+                loss_given_default=1.00,  # Assumed model parameter
+            )
+
+            # 4. Offchain Sleeves & Reserves
+            entities["binance_perp"] = Counterparty(
+                name="binance_perp",
+                category="perp_venue",
+                current_exposure_usd=0.0,  # Gated to T-bills under Basis Gate (2.2% funding < 4.03% DTB3)
+                exposure_cap_usd=15_000_000.0,
+                loss_given_default=1.00,  # Assumed model parameter
+            )
+            entities["uniswap_v3"] = Counterparty(
+                name="uniswap_v3",
+                category="amm_protocol",
+                current_exposure_usd=total_fund_usd * 0.15,  # 15.0% AMM sleeve ($7.5M)
+                exposure_cap_usd=10_000_000.0,
+                loss_given_default=0.90,  # Assumed model parameter
+            )
+            entities["us_treasury"] = Counterparty(
+                name="us_treasury",
+                category="treasury",
+                current_exposure_usd=total_fund_usd * 0.40,  # 40.0% T-bill reserve ($20.0M)
+                exposure_cap_usd=50_000_000.0,
+                loss_given_default=0.00,  # Sovereign risk-free floor
+            )
+
+        elif basis == "template":
             # 1. Lending / Borrow Protocols
             entities["aave_v3_core"] = Counterparty(
                 name="aave_v3_core",
@@ -116,14 +204,14 @@ class CounterpartyTable:
             entities["morpho"] = Counterparty(
                 name="morpho",
                 category="curation_protocol",
-                current_exposure_usd=total_fund_usd * 0.30,
+                current_exposure_usd=total_fund_usd * 0.45 * 0.702,  # $15.795M borrow
                 exposure_cap_usd=30_000_000.0,
                 loss_given_default=0.85,  # Assumed model parameter
             )
             entities["gearbox"] = Counterparty(
                 name="gearbox",
                 category="lending_protocol",
-                current_exposure_usd=0.0,  # secondary venue, capacity-constrained (~$24M TVL)
+                current_exposure_usd=0.0,  # secondary venue, capacity constrained at design size
                 exposure_cap_usd=10_000_000.0,
                 loss_given_default=0.90,  # Assumed model parameter
             )
@@ -155,14 +243,14 @@ class CounterpartyTable:
             entities["bitgo"] = Counterparty(
                 name="bitgo",
                 category="custodian",
-                current_exposure_usd=total_fund_usd * 0.35,  # WBTC custody
+                current_exposure_usd=total_fund_usd * 0.45,  # 100% WBTC
                 exposure_cap_usd=40_000_000.0,
                 loss_given_default=1.00,  # Assumed model parameter
             )
             entities["coinbase"] = Counterparty(
                 name="coinbase",
                 category="asset_issuer",
-                current_exposure_usd=total_fund_usd * 0.15,  # cbBTC minting/backing
+                current_exposure_usd=0.0,
                 exposure_cap_usd=30_000_000.0,
                 loss_given_default=1.00,  # Assumed model parameter
             )
@@ -188,93 +276,6 @@ class CounterpartyTable:
                 current_exposure_usd=total_fund_usd * 0.20,  # 20% T-bill liquidity floor
                 exposure_cap_usd=50_000_000.0,
                 loss_given_default=0.00,  # Sovereign risk-free floor
-            )
-
-        elif basis in ("rebuilt", "fund_equity"):
-            # Rebuilt §8 multi-strategy fund equity roster (100% basis)
-            entities["aave_v3_core"] = Counterparty(
-                name="aave_v3_core",
-                category="lending_protocol",
-                current_exposure_usd=total_fund_usd * 0.45,  # 45% carry sleeve collateral / borrow venue
-                exposure_cap_usd=35_000_000.0,
-                loss_given_default=0.80,  # Assumed model parameter
-            )
-            entities["morpho"] = Counterparty(
-                name="morpho",
-                category="curation_protocol",
-                current_exposure_usd=total_fund_usd * 0.45 * 0.60,  # $13.5M deployed USDC across vaults
-                exposure_cap_usd=30_000_000.0,
-                loss_given_default=0.85,  # Assumed model parameter
-            )
-            entities["gearbox"] = Counterparty(
-                name="gearbox",
-                category="lending_protocol",
-                current_exposure_usd=0.0,  # secondary venue, capacity-constrained (~$24M TVL)
-                exposure_cap_usd=10_000_000.0,
-                loss_given_default=0.90,  # Assumed model parameter
-            )
-
-            # Deployment Vaults ($13.5M borrow split across 3 vaults = $4.5M each)
-            vault_dep = (total_fund_usd * 0.45 * 0.60) / 3.0
-            entities["kpk_usdc_yield_vault"] = Counterparty(
-                name="kpk_usdc_yield_vault",
-                category="deployment_vault",
-                current_exposure_usd=vault_dep,
-                exposure_cap_usd=12_500_000.0,  # 25% cap on $50M vault
-                loss_given_default=0.65,        # Assumed model parameter
-            )
-            entities["kpk_usdc_yield_rwa_vault"] = Counterparty(
-                name="kpk_usdc_yield_rwa_vault",
-                category="deployment_vault",
-                current_exposure_usd=vault_dep,
-                exposure_cap_usd=12_500_000.0,  # 25% cap on $50M vault
-                loss_given_default=0.65,        # Assumed model parameter
-            )
-            entities["yo_ecosystem_yousd"] = Counterparty(
-                name="yo_ecosystem_yousd",
-                category="deployment_vault",
-                current_exposure_usd=vault_dep,
-                exposure_cap_usd=12_500_000.0,  # 25% cap on $50M vault
-                loss_given_default=0.65,        # Assumed model parameter
-            )
-
-            # Asset Issuers & Custodians (Carry Collateral = 45% = $22.5M, 50:50 split)
-            entities["bitgo"] = Counterparty(
-                name="bitgo",
-                category="custodian",
-                current_exposure_usd=total_fund_usd * 0.225,  # 22.5% fund equity (50% of carry collateral)
-                exposure_cap_usd=30_000_000.0,
-                loss_given_default=1.00,                      # Assumed model parameter
-            )
-            entities["coinbase"] = Counterparty(
-                name="coinbase",
-                category="asset_issuer",
-                current_exposure_usd=total_fund_usd * 0.225,  # 22.5% fund equity (50% of carry collateral)
-                exposure_cap_usd=30_000_000.0,
-                loss_given_default=1.00,                      # Assumed model parameter
-            )
-
-            # Offchain & Multi-Strategy Sleeves
-            entities["binance_perp"] = Counterparty(
-                name="binance_perp",
-                category="perp_venue",
-                current_exposure_usd=0.0,  # Gated to T-bills under Basis Gate (2.2% funding < 4.03% DTB3)
-                exposure_cap_usd=15_000_000.0,
-                loss_given_default=1.00,   # Assumed model parameter
-            )
-            entities["uniswap_v3"] = Counterparty(
-                name="uniswap_v3",
-                category="amm_protocol",
-                current_exposure_usd=total_fund_usd * 0.15,  # 15% AMM sleeve
-                exposure_cap_usd=10_000_000.0,
-                loss_given_default=0.90,                     # Assumed model parameter
-            )
-            entities["us_treasury"] = Counterparty(
-                name="us_treasury",
-                category="treasury",
-                current_exposure_usd=total_fund_usd * 0.40,  # 40% T-bill reserve
-                exposure_cap_usd=50_000_000.0,
-                loss_given_default=0.00,                     # Sovereign risk-free assumption
             )
         else:
             raise ValueError(f"Unknown roster basis: {basis}")
@@ -357,31 +358,31 @@ def compute_portfolio_metrics(
     """Compute concentration shares and HHI indices for fund portfolio per SPEC §13.1.
 
     Normalized on ONE unified book definition ($50M multi-strategy fund equity):
-      - Carry Sleeve: 45.0% ($22.5M) split 50:50 WBTC:cbBTC on Aave v3 Core
+      - Carry Sleeve: 45.0% ($22.5M) split 70:30 WBTC:cbBTC on Aave v3 Core
       - AMM Sleeve: 15.0% ($7.5M) on Uniswap v3
       - T-Bill Reserve: 40.0% ($20.0M) US Treasury 3-month bills
     """
     if venue_exposures is None:
         venue_exposures = {
-            "aave_v3_core": total_fund_usd * 0.45,  # 45% carry collateral/borrow venue
-            "us_treasury": total_fund_usd * 0.40,   # 40% sovereign cash reserve
-            "uniswap_v3": total_fund_usd * 0.15,    # 15% AMM sleeve
+            "aave_v3_core": total_fund_usd * 0.45,  # 45% carry collateral/borrow venue ($22.5M)
+            "us_treasury": total_fund_usd * 0.40,   # 40% sovereign cash reserve ($20.0M)
+            "uniswap_v3": total_fund_usd * 0.15,    # 15% AMM sleeve ($7.5M)
         }
 
     if asset_exposures is None:
         asset_exposures = {
-            "WBTC": total_fund_usd * 0.225,         # 22.5% of fund equity
-            "cbBTC": total_fund_usd * 0.225,        # 22.5% of fund equity
-            "USD_TBill": total_fund_usd * 0.40,     # 40.0% sovereign cash
-            "USDC_AMM": total_fund_usd * 0.15,      # 15.0% AMM liquidity
+            "WBTC": total_fund_usd * 0.45 * 0.70,   # 31.5% of fund equity ($15.75M)
+            "cbBTC": total_fund_usd * 0.45 * 0.30,  # 13.5% of fund equity ($6.75M)
+            "USD_TBill": total_fund_usd * 0.40,     # 40.0% sovereign cash ($20.0M)
+            "USDC_AMM": total_fund_usd * 0.15,      # 15.0% AMM liquidity ($7.5M)
         }
 
     if issuer_exposures is None:
         issuer_exposures = {
-            "bitgo": total_fund_usd * 0.225,        # 22.5% BitGo (WBTC custody)
-            "coinbase": total_fund_usd * 0.225,     # 22.5% Coinbase (cbBTC issuer/custody)
-            "us_treasury": total_fund_usd * 0.40,   # 40.0% US Sovereign
-            "uniswap_v3": total_fund_usd * 0.15,    # 15.0% Uniswap smart contracts
+            "bitgo": total_fund_usd * 0.45 * 0.70,      # 31.5% BitGo (WBTC custody, $15.75M)
+            "coinbase": total_fund_usd * 0.45 * 0.30,   # 13.5% Coinbase (cbBTC issuer/custody, $6.75M)
+            "us_treasury": total_fund_usd * 0.40,       # 40.0% US Sovereign ($20.0M)
+            "uniswap_v3": total_fund_usd * 0.15,        # 15.0% Uniswap smart contracts ($7.5M)
         }
 
     v_shares = compute_exposure_shares(venue_exposures)

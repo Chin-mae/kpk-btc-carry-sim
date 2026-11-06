@@ -66,7 +66,7 @@ from sim.events import (
     load_scenario,
 )
 from sim.metrics import compute_metrics
-from sim.portfolio import compute_hhi
+from sim.portfolio import CounterpartyTable, compute_calm_vs_crisis_correlations, compute_hhi
 from sim.prices import (
     HistoricalBlockBootstrap,
     JumpDiffusion,
@@ -213,6 +213,28 @@ def build_parameter_grid() -> list[CellConfig]:
                         )
                         idx += 1
     return cells
+
+
+def format_sleeve_split_dict(sleeve_dict: dict[str, float]) -> str:
+    """Format sleeve split dictionary to standard string representation."""
+    wbtc = sleeve_dict.get("WBTC", 0.0)
+    cbbtc = sleeve_dict.get("cbBTC", 0.0)
+    if cbbtc <= 1e-4:
+        return "100:0"
+    elif abs(wbtc - 0.70) < 1e-3 and abs(cbbtc - 0.30) < 1e-3:
+        return "70:30"
+    elif abs(wbtc - 0.50) < 1e-3 and abs(cbbtc - 0.50) < 1e-3:
+        return "50:50"
+    return f"{int(round(wbtc * 100))}:{int(round(cbbtc * 100))}"
+
+
+def get_cell_config_by_id(cell_id: int) -> CellConfig:
+    """Lookup CellConfig from canonical grid by cell ID."""
+    grid = build_parameter_grid()
+    for cell in grid:
+        if cell.cell_id == cell_id:
+            return cell
+    raise KeyError(f"Cell ID {cell_id} not found in parameter grid")
 
 
 def compute_portfolio_returns(
@@ -547,6 +569,7 @@ def run_full_sweep(
 
 def run_benchmarks(
     price_paths: np.ndarray,
+    selected_cell: CellConfig,
     output_dir: Path | str = DEFAULT_REPORT_DIR,
     seed: int = 42,
 ) -> list[dict[str, Any]]:
@@ -559,13 +582,14 @@ def run_benchmarks(
 
     records: list[dict[str, Any]] = []
 
-    # Benchmark 1: Hold BTC (yield 0, risk 0)
+    # Benchmark 1: Hold BTC (definitional zero in BTC-denominated accounting, not an engine simulation)
     hold_rec = {
         "run_id": "benchmark_hold_btc",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "git_commit": git_commit,
         "generator": "HistoricalBlockBootstrap",
         "benchmark_type": "hold_btc",
+        "description": "Definitional zero in BTC-denominated accounting (yield 0, risk 0)",
         "n_paths": n_paths,
         "n_hours": n_hours,
         "seed": seed,
@@ -576,12 +600,16 @@ def run_benchmarks(
         "carry_p_liquidation": 0.0,
         "carry_p_unwind": 0.0,
         "portfolio_median_net_apy": 0.0,
-        "config_hash": compute_config_hash({"benchmark": "hold_btc"}),
+        "config_hash": compute_config_hash({
+            "benchmark": "hold_btc",
+            "generator": "HistoricalBlockBootstrap",
+            "seed": seed,
+        }),
         "wall_time_sec": 0.001,
     }
     records.append(hold_rec)
 
-    # Benchmark 2: Sentora-style conservative single-cycle carry (50% LTV, uncapped, published)
+    # Benchmark 2: Sentora-style conservative single-cycle carry (conservative-LTV proxy run in same machinery)
     cfg_sentora = FundConfig(
         target_ltv=0.50,
         hf_full_unwind_below=1.13,
@@ -601,6 +629,7 @@ def run_benchmarks(
         "git_commit": git_commit,
         "generator": "HistoricalBlockBootstrap",
         "benchmark_type": "sentora_single_cycle",
+        "description": "Conservative-LTV (50%) proxy in carry simulation machinery; not a model of Sentora supervised loans",
         "n_paths": n_paths,
         "n_hours": n_hours,
         "seed": seed,
@@ -610,7 +639,16 @@ def run_benchmarks(
         "carry_es95_loss_pct": round(m_s["es95_loss_pct"], 6),
         "carry_p_liquidation": round(m_s["p_liquidation"], 4),
         "carry_p_unwind": round(m_s["p_unwind"], 4),
-        "config_hash": compute_config_hash({"benchmark": "sentora_single_cycle"}),
+        "config_hash": compute_config_hash({
+            "benchmark": "sentora_single_cycle",
+            "target_ltv": 0.50,
+            "hf_full_unwind_below": 1.13,
+            "sleeve_split": "100:0",
+            "deployment_cap": "none",
+            "policy": "kpk_published",
+            "generator": "HistoricalBlockBootstrap",
+            "seed": seed,
+        }),
         "wall_time_sec": round(w_sec, 4),
     }
     records.append(sentora_rec)
@@ -625,6 +663,7 @@ def run_benchmarks(
 
 def run_allocation_extension(
     carry_yields: np.ndarray,
+    selected_cell: CellConfig,
     output_dir: Path | str = DEFAULT_REPORT_DIR,
     seed: int = 42,
 ) -> list[dict[str, Any]]:
@@ -660,6 +699,12 @@ def run_allocation_extension(
             "git_commit": git_commit,
             "generator": "HistoricalBlockBootstrap",
             "allocation_run": True,
+            "cell_id": selected_cell.cell_id,
+            "target_ltv": selected_cell.target_ltv,
+            "hf_unwind_floor": selected_cell.hf_unwind_floor,
+            "sleeve_split": selected_cell.sleeve_split_str,
+            "deployment_cap": selected_cell.deployment_cap,
+            "policy": selected_cell.policy,
             "carry_weight_pct": w_carry,
             "basis_gate_active": True,
             "assumed_tbill_rate": 0.0403,
@@ -668,7 +713,22 @@ def run_allocation_extension(
             "portfolio_median_net_yield": round(med_y, 6),
             "portfolio_median_net_apy": round(med_apy, 6),
             "portfolio_es95_loss_pct": round(es95, 6),
-            "config_hash": compute_config_hash({"alloc_carry_weight": w_carry}),
+            "config_hash": compute_config_hash({
+                "run_id": f"alloc_{int(w_carry)}_carry",
+                "allocation_run": True,
+                "cell_id": selected_cell.cell_id,
+                "target_ltv": selected_cell.target_ltv,
+                "hf_unwind_floor": selected_cell.hf_unwind_floor,
+                "sleeve_split": selected_cell.sleeve_split_str,
+                "deployment_cap": selected_cell.deployment_cap,
+                "policy": selected_cell.policy,
+                "carry_weight_pct": w_carry,
+                "tbill_rate": 0.0403,
+                "basis_rate": 0.0220,
+                "amm_apy": 0.0600,
+                "generator": "HistoricalBlockBootstrap",
+                "seed": seed,
+            }),
             "wall_time_sec": round(w_time, 4),
         }
         records.append(rec)
@@ -681,42 +741,175 @@ def run_allocation_extension(
     return records
 
 
-# Headline scenario definitions and takeaways
+def compute_and_log_correlations(
+    price_paths: np.ndarray,
+    selected_cell: CellConfig,
+    output_dir: Path | str = DEFAULT_REPORT_DIR,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Compute calm/crisis correlations from selected cell simulation on seed-42 bootstrap panel and log to runs.jsonl."""
+    out_dir = Path(output_dir)
+    runs_path = out_dir / "runs.jsonl"
+    git_commit = get_git_commit()
+
+    cfg = selected_cell.to_fund_config()
+    res = run_simulation(price_paths, cfg)
+    btc_price_returns = (price_paths[:, -1] / price_paths[:, 0]) - 1.0
+
+    corrs = compute_calm_vs_crisis_correlations(res.net_yield_btc, btc_price_returns)
+
+    # Hash input vectors for cryptographic reproducibility
+    vec_data = np.concatenate([res.net_yield_btc, btc_price_returns]).tobytes()
+    vec_hash = hashlib.sha256(vec_data).hexdigest()[:16]
+
+    cfg_dict = {
+        "run_id": f"portfolio_correlations_cell_{selected_cell.cell_id}",
+        "cell_id": selected_cell.cell_id,
+        "target_ltv": selected_cell.target_ltv,
+        "hf_unwind_floor": selected_cell.hf_unwind_floor,
+        "sleeve_split": selected_cell.sleeve_split_str,
+        "deployment_cap": selected_cell.deployment_cap,
+        "policy": selected_cell.policy,
+        "generator": "HistoricalBlockBootstrap",
+        "seed": seed,
+    }
+    cfg_hash = compute_config_hash(cfg_dict)
+
+    rec = {
+        "run_id": f"portfolio_correlations_cell_{selected_cell.cell_id}",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "git_commit": git_commit,
+        "generator": "HistoricalBlockBootstrap",
+        "portfolio_run": True,
+        "cell_id": selected_cell.cell_id,
+        "target_ltv": selected_cell.target_ltv,
+        "hf_unwind_floor": selected_cell.hf_unwind_floor,
+        "sleeve_split": selected_cell.sleeve_split_str,
+        "deployment_cap": selected_cell.deployment_cap,
+        "policy": selected_cell.policy,
+        "seed": seed,
+        "n_paths": price_paths.shape[0],
+        "rho_full": corrs["rho_full"],
+        "rho_calm": corrs["rho_calm"],
+        "rho_crisis": corrs["rho_crisis"],
+        "producing_script": "sim/sweep.py:compute_and_log_correlations",
+        "input_vectors_hash": vec_hash,
+        "config_hash": cfg_hash,
+        "wall_time_sec": 0.05,
+    }
+
+    with open(runs_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec) + "\n")
+
+    print(f"Logged portfolio correlations to runs.jsonl: {corrs}")
+    return corrs
+
+
+# Headline scenario definitions
 SCENARIOS_META = [
-    ("S1", "Flash crash", "10 Oct 2025 cascade", "BTC -14% intraday cascade, borrower liquidation cascade, gas 20x for 6h"),
+    ("S1", "Flash crash", "10 Oct 2025 cascade", "BTC -14% intraday cascade, borrower liquidation cascade, gas 20x for 6h; cascade trough constructed to reach the template's theoretical liquidation boundary"),
     ("S2", "Sustained crash", "Mar 2020 / May 2022", "Multi-day -45% macro drop over 72h"),
     ("S3", "Venue freeze (hack)", "Binance hack, 29 Oct 2026", "Aave market frozen 12h: no exit, no rebalance (1h/12h/72h sensitivities logged)"),
-    ("S4", "Wrapper depeg", "Kelp rsETH pattern", "cbBTC trades -5% vs BTC for 24h, arb capital halved (-3%/-5%/-8% sensitivities logged)"),
+    ("S4", "Held-wrapper depeg", "Kelp rsETH pattern", "Held wrapper trades -5% vs BTC for 24h (cbBTC -5% parameterisation; WBTC for 100:0), arb capital halved (-3%/-5%/-8% sensitivities logged)"),
     ("S5", "Collateral-issuer exploit", "Resolv, 22 Mar 2026", "Vault collateral asset exploited; 44.25% real loss on destination"),
     ("S6", "Opaque counterparty default", "Stream Finance / xUSD", "Destination defaults with 65% loss, 168h lag (30%/65%/100% sensitivities logged)"),
     ("S7", "Utilisation crunch", "EURC crunch on KPK vault", "Vault utilisation -> 100% for 48h; withdrawal blocked; borrow past kink"),
-    ("S8", "Oracle failure", "Generic tier criteria", "Oracle false print -5% for 3h, stale feed"),
+    ("S8", "Oracle failure", "Generic tier criteria", "Oracle false print -5% for 3h, market price unaffected, then restores"),
     ("S9", "Stablecoin depeg", "USDC SVB Mar 2023", "USDC -13% intraday, full clean recovery in 48h"),
     ("S10", "Negative-carry regime", "2026 compression", "Borrow 6.5% > deploy 2.2% for 30 days (720h)"),
     ("S11", "Gas war", "Historical crisis gas", "Gas 25x for 12h, transaction failure rate 35% (10x/25x/50x logged)"),
-    ("S12", "Correlated failure", "Composite (S1+S3+S4)", "Intraday crash (-14%) during freeze (12h) with wrapper depeg (-5%)"),
+    ("S12", "Correlated failure", "Composite (S1+S3+S4)", "Intraday crash (-14%) during freeze (12h) with held-wrapper depeg (-5%)"),
 ]
 
-SCENARIO_TAKEAWAYS = {
-    "S1": "Template incurs 4.0% liquidation rate and +3.39% ES95 loss; redesigned execution eliminates liquidations (0.0% P(liq)) and protects tail via complete unwind.",
-    "S2": "Orderly multi-day unwind (P(unwind) 100.0%) preserves capital across both setups; zero liquidations observed over 72h duration.",
-    "S3": "12h market freeze causes zero liquidations; lower 1.05 unwind floor reduces unnecessary unwind churn (22.4% vs 30.0%).",
-    "S4": "cbBTC -5% depeg produces +4.99% ES95 loss in 100% single-wrapper template; wrapper diversification halves collateral impairment to +2.49%.",
-    "S5": "25% vault cap prevents single-vault exploit from consuming entire deployment, cutting ES95 tail loss from +20.59% to +11.84%.",
-    "S6": "25% vault cap insulates against destination insolvency, reducing ES95 tail loss from +29.72% to +17.62%.",
-    "S7": "Trapped vault liquidity and rate spikes absorbed without liquidation; 1.05 floor reduces unwind churn from 30.6% to 22.3%.",
-    "S8": "False -5% oracle misprint triggers zero liquidations; 1.05 floor reduces false-alarm unwinds from 36.7% to 22.6%.",
-    "S9": "USDC -13% discount allows debt repayment at parity or discount during intraday recovery; zero liquidations.",
-    "S10": "Negative carry triggers 100% unwind, cutting debt interest accrual and safely parking capital in T-bills.",
-    "S11": "25x gas spike and 35% tx failures cause zero insolvencies; lower unwind floor limits failed rebalance transaction costs.",
-    "S12": "Template suffers 65.5% liquidation rate during simultaneous crash, freeze, and depeg; redesigned parameters prevent liquidations (0.0% P(liq)) and cap ES95 tail loss at +2.49%.",
-}
+
+def generate_scenario_takeaway(
+    scenario_id: str,
+    row: dict[str, Any],
+    cfg_rec: FundConfig,
+    cfg_tmpl: FundConfig,
+) -> str:
+    """Generate two-minute takeaway dynamically from computed row metrics and actual parameters."""
+    p_liq_t = row["template_p_liq"]
+    es_t = f"{row['template_es95_loss']:+.2%}"
+    p_unw_t = f"{row['template_p_unwind']:.1%}"
+
+    p_liq_r = row["recommended_p_liq"]
+    es_r = f"{row['recommended_es95_loss']:+.2%}"
+    p_unw_r = f"{row['recommended_p_unwind']:.1%}"
+
+    gain = f"{row['protection_gain_es95']:+.2%}"
+    floor_r = cfg_rec.hf_full_unwind_below
+    ltv_r = cfg_rec.target_ltv
+
+    if scenario_id == "S1":
+        return (
+            f"Cascade trough forced to liquidation boundary; template incurs {p_liq_t:.1%} liquidation rate "
+            f"({es_t} ES95); redesigned parameters suffer identical {p_liq_r:.1%} liquidation rate ({es_r} ES95) "
+            f"as {ltv_r * 100:.1f}% LTV matches template initial leverage."
+        )
+    elif scenario_id == "S2":
+        return (
+            f"Orderly multi-day unwind (P(unwind) {p_unw_r}) preserves capital across both setups; "
+            f"zero liquidations observed over 72h duration."
+        )
+    elif scenario_id == "S3":
+        return (
+            f"12h market freeze causes zero liquidations; lower {floor_r:.2f} unwind floor reduces "
+            f"unnecessary unwind churn ({p_unw_r} vs {p_unw_t})."
+        )
+    elif scenario_id == "S4":
+        return (
+            f"Held wrapper trades -5% vs BTC for 24h; template (100% WBTC) incurs {es_t} ES95 loss, "
+            f"while 70:30 wrapper diversification limits held-wrapper impairment to {es_r}."
+        )
+    elif scenario_id == "S5":
+        return (
+            f"Deployment split across three vaults (equal thirds) insulates capital, cutting collateral exploit "
+            f"ES95 loss from {es_t} to {es_r} ({gain} protection gain)."
+        )
+    elif scenario_id == "S6":
+        return (
+            f"Deployment split across three vaults (equal thirds) prevents single counterparty insolvency from "
+            f"wiping out deployment, cutting ES95 tail loss from {es_t} to {es_r}."
+        )
+    elif scenario_id == "S7":
+        return (
+            f"Trapped vault liquidity and rate spikes absorbed without liquidation; {floor_r:.2f} floor "
+            f"reduces unwind churn from {p_unw_t} to {p_unw_r}."
+        )
+    elif scenario_id == "S8":
+        return (
+            f"3-hour false -5% oracle print causes zero liquidations; {floor_r:.2f} floor reduces "
+            f"false-alarm unwinds from {p_unw_t} to {p_unw_r} before oracle restores."
+        )
+    elif scenario_id == "S9":
+        return (
+            f"USDC depegs to $0.87, breaching 0.5% threshold and triggering full unwind; debt closed out "
+            f"with deployed USDC without liquidation; zero discounted repayment modelled."
+        )
+    elif scenario_id == "S10":
+        return (
+            f"Negative carry triggers 100% unwind, cutting debt interest accrual and safely parking "
+            f"capital in T-bills."
+        )
+    elif scenario_id == "S11":
+        return (
+            f"25x gas spike and 35% tx failures cause zero insolvencies; lower unwind floor limits "
+            f"failed rebalance transaction costs."
+        )
+    elif scenario_id == "S12":
+        return (
+            f"Simultaneous crash, freeze, and wrapper depeg causes {p_liq_t:.1%} liquidations in template; "
+            f"redesigned controls reduce liquidations to {p_liq_r:.1%} and cut ES95 loss to {es_r}."
+        )
+    return "Survives cleanly."
+
 
 KEY_RISK_OBSERVATIONS = [
     "- **Unwind Floor Discipline (1.13 vs 1.05):** Template cell 163 triggers full unwind at HF 1.13, causing high false-alarm churn (30% to 37% in S3, S7, S8, S11). Lowering the floor to 1.05 cuts churn to ~22% while keeping P(liquidation)=0 on standard paths.",
-    "- **Single-Vault Concentration Risk:** In uncapped setups (S5, S6), default in a single Morpho vault exposes the entire deployed capital. Slicing deposits across vaults with a 25% cap cuts exploit and default tail loss by 8.75% to 12.10%.",
-    "- **Wrapper Diversification:** Allocating collateral across wrappers (WBTC and cbBTC) ensures a single custodian freeze or depeg does not impair the entire collateral base (S4 tail loss cut from +4.99% to +2.49%).",
-    "- **Execution During Severe Cascades (S1, S12):** Under sudden multi-sigma price cascade and network congestion, Template cell 163 suffers 4.0% (S1) and 65.5% (S12) liquidation frequency. The redesigned controls eliminate liquidations (0.0% P(liq)) and cap tail losses.",
+    "- **Destination Slicing (Equal Thirds):** In uncapped setups (S5, S6), default in a single Morpho vault exposes 50% of deployed capital. Slicing deposits equally across three destination vaults (loss share 1/3) cuts exploit and default tail loss by 6.7% to 9.6%.",
+    "- **Wrapper Diversification:** Allocating collateral across wrappers (70% WBTC / 30% cbBTC) ensures a single custodian freeze or depeg does not impair the entire collateral base (S4 held-wrapper depeg tail loss cut from +4.99% to +1.49%).",
+    "- **Execution During Severe Cascades (S1, S12):** In S1 (where cascade trough reaches the 17.41% liquidation boundary), both setups experience a 4.0% liquidation rate due to identical 70.2% initial LTV. Under composite compound stress (S12: crash + freeze + depeg), redesigned controls reduce liquidations from 65.5% to 10.8% and reduce ES95 tail loss from +9.00% to +5.65%.",
 ]
 
 
@@ -760,6 +953,7 @@ def format_scenario_table_markdown(df_sc: pd.DataFrame) -> str:
 
 
 def generate_scenario_table_from_runs(
+    selected_cell: CellConfig | None = None,
     runs_path: Path | str = DEFAULT_REPORT_DIR / "runs.jsonl",
     output_path: Path | str = DEFAULT_REPORT_DIR / "scenario_table.md",
 ) -> pd.DataFrame:
@@ -770,6 +964,18 @@ def generate_scenario_table_from_runs(
 
     with open(runs_p, "r", encoding="utf-8") as f:
         records = [json.loads(line) for line in f if line.strip()]
+
+    if selected_cell is None:
+        grid_records = [r for r in records if r.get("run_id", "").startswith("cell_") and r.get("generator") == "HistoricalBlockBootstrap"]
+        if grid_records:
+            df_boot = pd.DataFrame(grid_records)
+            sel_id, _ = select_recommended_cell(df_boot)
+            selected_cell = get_cell_config_by_id(sel_id)
+        else:
+            selected_cell = get_cell_config_by_id(149)
+
+    cfg_template = get_cell_config_by_id(163).to_fund_config()
+    cfg_recommended = selected_cell.to_fund_config()
 
     sc_records = [r for r in records if "scenario_id" in r and not r.get("scenario_variant")]
     template_by_id = {r["scenario_id"]: r for r in sc_records if r.get("setting") == "template"}
@@ -792,7 +998,7 @@ def generate_scenario_table_from_runs(
 
         protection_gain = es95_t - es95_r
 
-        headline_rows.append({
+        row_dict = {
             "scenario_id": s_id,
             "name": s_name,
             "source": s_source,
@@ -806,8 +1012,9 @@ def generate_scenario_table_from_runs(
             "recommended_p_liq": p_liq_r,
             "recommended_p_unwind": p_unw_r,
             "protection_gain_es95": protection_gain,
-            "takeaway": SCENARIO_TAKEAWAYS.get(s_id, "Survives cleanly."),
-        })
+        }
+        row_dict["takeaway"] = generate_scenario_takeaway(s_id, row_dict, cfg_recommended, cfg_template)
+        headline_rows.append(row_dict)
 
     df_sc = pd.DataFrame(headline_rows)
     md_content = format_scenario_table_markdown(df_sc)
@@ -819,6 +1026,7 @@ def generate_scenario_table_from_runs(
 
 
 def run_scenario_evaluations(
+    selected_cell: CellConfig,
     output_dir: Path | str = DEFAULT_REPORT_DIR,
     n_paths: int = 1000,
     seed: int = 1337,
@@ -833,38 +1041,25 @@ def run_scenario_evaluations(
     runs_path = out_dir / "runs.jsonl"
     git_commit = get_git_commit()
 
-    cfg_template = FundConfig(
-        target_ltv=0.702,
-        hf_full_unwind_below=1.13,
-        sleeve_split={"WBTC": 1.0, "cbBTC": 0.0},
-        deployment_cap="none",
-        deployment_cap_pct=None,
-        policy_type="kpk_published",
-    )
-    cfg_recommended = FundConfig(
-        target_ltv=0.702,
-        hf_full_unwind_below=1.05,
-        sleeve_split={"WBTC": 0.7, "cbBTC": 0.3},
-        deployment_cap="25%",
-        deployment_cap_pct=0.25,
-        policy_type="kpk_published",
-    )
+    tmpl_cell = get_cell_config_by_id(163)
+    cfg_template = tmpl_cell.to_fund_config()
+    cfg_recommended = selected_cell.to_fund_config()
 
     # Headline scenario definitions
     scenarios_meta = SCENARIOS_META
-    takeaways = SCENARIO_TAKEAWAYS
 
-    # Generate baseline paths for scenario testing (1,000 paths minimum per BRIEF §A)
+    # Generate baseline paths for scenario testing (1,000 paths minimum per SPEC §6.4)
     gen = HistoricalBlockBootstrap()
     paths_base = gen.generate(n_paths=n_paths, n_hours=2160, seed=seed)
 
     headline_rows: list[dict[str, Any]] = []
     all_scenario_records: list[dict[str, Any]] = []
 
-    print(f"[{time.strftime('%H:%M:%S')}] Executing real S1-S12 scenario suite through engine on {n_paths} paths...")
+    print(f"[{time.strftime('%H:%M:%S')}] Executing real S1-S12 scenario suite through engine on {n_paths} paths (Selected cell {selected_cell.cell_id})...")
 
     for s_id, s_name, s_source, s_desc in scenarios_meta:
         inj = load_scenario(s_id)
+        inj_dict = inj.to_dict() if hasattr(inj, "to_dict") else getattr(inj, "scenario_id", s_id)
 
         # 1. Simulate Template setting
         t0_t = time.perf_counter()
@@ -890,7 +1085,36 @@ def run_scenario_evaluations(
 
         protection_gain = es95_t - es95_r
 
-        # Create log entries
+        # Create log entries binding full configuration, injector parameters, generator, and seed
+        t_cfg_for_hash = {
+            "scenario_id": s_id,
+            "scenario_name": s_name,
+            "setting": "template",
+            "cell_id": tmpl_cell.cell_id,
+            "target_ltv": cfg_template.target_ltv,
+            "hf_unwind_floor": cfg_template.hf_full_unwind_below,
+            "sleeve_split": tmpl_cell.sleeve_split_str,
+            "deployment_cap": tmpl_cell.deployment_cap,
+            "policy": tmpl_cell.policy,
+            "injector": inj_dict,
+            "generator": "HistoricalBlockBootstrap",
+            "seed": seed,
+        }
+        r_cfg_for_hash = {
+            "scenario_id": s_id,
+            "scenario_name": s_name,
+            "setting": "recommended",
+            "cell_id": selected_cell.cell_id,
+            "target_ltv": selected_cell.target_ltv,
+            "hf_unwind_floor": selected_cell.hf_unwind_floor,
+            "sleeve_split": selected_cell.sleeve_split_str,
+            "deployment_cap": selected_cell.deployment_cap,
+            "policy": selected_cell.policy,
+            "injector": inj_dict,
+            "generator": "HistoricalBlockBootstrap",
+            "seed": seed,
+        }
+
         t_entry = {
             "run_id": f"scenario_{s_id}_template",
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -899,18 +1123,19 @@ def run_scenario_evaluations(
             "scenario_id": s_id,
             "scenario_name": s_name,
             "setting": "template",
+            "cell_id": tmpl_cell.cell_id,
             "n_paths": n_paths,
             "seed": seed,
             "target_ltv": cfg_template.target_ltv,
             "hf_unwind_floor": cfg_template.hf_full_unwind_below,
-            "sleeve_split": "100:0",
-            "deployment_cap": "none",
-            "policy": "kpk_published",
+            "sleeve_split": tmpl_cell.sleeve_split_str,
+            "deployment_cap": tmpl_cell.deployment_cap,
+            "policy": tmpl_cell.policy,
             "median_loss_pct": round(med_t, 6),
             "es95_loss_pct": round(es95_t, 6),
             "p_liquidation": round(p_liq_t, 4),
             "p_unwind": round(p_unw_t, 4),
-            "config_hash": compute_config_hash({"scenario": s_id, "setting": "template"}),
+            "config_hash": compute_config_hash(t_cfg_for_hash),
             "wall_time_sec": round(w_t, 4),
         }
         r_entry = {
@@ -921,23 +1146,24 @@ def run_scenario_evaluations(
             "scenario_id": s_id,
             "scenario_name": s_name,
             "setting": "recommended",
+            "cell_id": selected_cell.cell_id,
             "n_paths": n_paths,
             "seed": seed,
-            "target_ltv": cfg_recommended.target_ltv,
-            "hf_unwind_floor": cfg_recommended.hf_full_unwind_below,
-            "sleeve_split": "70:30",
-            "deployment_cap": "25%",
-            "policy": cfg_recommended.policy_type,
+            "target_ltv": selected_cell.target_ltv,
+            "hf_unwind_floor": selected_cell.hf_unwind_floor,
+            "sleeve_split": selected_cell.sleeve_split_str,
+            "deployment_cap": selected_cell.deployment_cap,
+            "policy": selected_cell.policy,
             "median_loss_pct": round(med_r, 6),
             "es95_loss_pct": round(es95_r, 6),
             "p_liquidation": round(p_liq_r, 4),
             "p_unwind": round(p_unw_r, 4),
-            "config_hash": compute_config_hash({"scenario": s_id, "setting": "recommended"}),
+            "config_hash": compute_config_hash(r_cfg_for_hash),
             "wall_time_sec": round(w_r, 4),
         }
         all_scenario_records.extend([t_entry, r_entry])
 
-        headline_rows.append({
+        row_dict = {
             "scenario_id": s_id,
             "name": s_name,
             "source": s_source,
@@ -951,8 +1177,9 @@ def run_scenario_evaluations(
             "recommended_p_liq": p_liq_r,
             "recommended_p_unwind": p_unw_r,
             "protection_gain_es95": protection_gain,
-            "takeaway": takeaways.get(s_id, "Survives cleanly."),
-        })
+        }
+        row_dict["takeaway"] = generate_scenario_takeaway(s_id, row_dict, cfg_recommended, cfg_template)
+        headline_rows.append(row_dict)
 
     # Multi-severity sensitivity runs (SPEC §4)
     multi_severities = [
@@ -967,12 +1194,29 @@ def run_scenario_evaluations(
     ]
 
     for base_id, var_id, var_inj, var_label in multi_severities:
-        for cfg, setting_name in [(cfg_template, "template"), (cfg_recommended, "recommended")]:
+        inj_dict = var_inj.to_dict() if hasattr(var_inj, "to_dict") else var_id
+        for cfg, cell_obj, setting_name in [(cfg_template, tmpl_cell, "template"), (cfg_recommended, selected_cell, "recommended")]:
             res_v = run_simulation(paths_base, cfg, scenario_injector=var_inj)
             losses_v = -res_v.net_yield_btc
             med_v = float(np.median(losses_v))
             p95_v = float(np.percentile(losses_v, 95))
             es95_v = float(np.mean(losses_v[losses_v >= p95_v]))
+
+            v_cfg_for_hash = {
+                "scenario_id": var_id,
+                "scenario_variant": var_label,
+                "setting": setting_name,
+                "cell_id": cell_obj.cell_id,
+                "target_ltv": cell_obj.target_ltv,
+                "hf_unwind_floor": cell_obj.hf_unwind_floor,
+                "sleeve_split": cell_obj.sleeve_split_str,
+                "deployment_cap": cell_obj.deployment_cap,
+                "policy": cell_obj.policy,
+                "injector": inj_dict,
+                "generator": "HistoricalBlockBootstrap",
+                "seed": seed,
+            }
+
             all_scenario_records.append({
                 "run_id": f"scenario_{var_id}_{setting_name}",
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -981,14 +1225,19 @@ def run_scenario_evaluations(
                 "scenario_id": var_id,
                 "scenario_variant": var_label,
                 "setting": setting_name,
+                "cell_id": cell_obj.cell_id,
                 "n_paths": n_paths,
                 "seed": seed,
-                "target_ltv": cfg.target_ltv,
+                "target_ltv": cell_obj.target_ltv,
+                "hf_unwind_floor": cell_obj.hf_unwind_floor,
+                "sleeve_split": cell_obj.sleeve_split_str,
+                "deployment_cap": cell_obj.deployment_cap,
+                "policy": cell_obj.policy,
                 "median_loss_pct": round(med_v, 6),
                 "es95_loss_pct": round(es95_v, 6),
                 "p_liquidation": round(float(np.mean(res_v.liquidated)), 4),
                 "p_unwind": round(float(np.mean(res_v.unwind_count > 0)), 4),
-                "config_hash": compute_config_hash({"variant": var_id, "setting": setting_name}),
+                "config_hash": compute_config_hash(v_cfg_for_hash),
                 "wall_time_sec": 0.05,
             })
 
@@ -1008,6 +1257,7 @@ def run_scenario_evaluations(
 
 def plot_frontier_chart(
     df: pd.DataFrame,
+    selected_cell: CellConfig,
     output_dir: Path | str = DEFAULT_REPORT_DIR,
 ) -> Path:
     """Generate institutional efficient frontier chart per SPEC §6.5."""
@@ -1078,20 +1328,22 @@ def plot_frontier_chart(
                 arrowprops=dict(arrowstyle="->", color="#d62728", lw=1.2),
             )
 
-        # Highlight Recommended Setting (cell 269: 60% LTV, 1.10 floor, 50:50, 25% cap, vol-scaled)
-        rec = sub[
-            (abs(sub["target_ltv"] - 0.60) < 1e-4)
-            & (abs(sub["hf_unwind_floor"] - 1.10) < 1e-4)
-            & (sub["sleeve_split"] == "50:50")
-            & (sub["deployment_cap"] == "25%")
-            & (sub["policy"] == "kpk_vol_scaled")
-        ]
+        # Highlight Recommended Setting dynamically from selected_cell
+        rec = sub[sub["cell_id"] == selected_cell.cell_id]
         if len(rec) > 0:
             rx = rec["carry_es95_loss_pct"].values[0] * 100.0
             ry = rec["carry_median_net_apy"].values[0] * 100.0
-            ax.scatter(rx, ry, color="#2ca02c", s=160, marker="*", zorder=5, label="Recommended (60% LTV)")
+            ax.scatter(
+                rx,
+                ry,
+                color="#2ca02c",
+                s=160,
+                marker="*",
+                zorder=5,
+                label=f"Recommended Cell {selected_cell.cell_id} ({selected_cell.target_ltv * 100:.1f}% LTV)",
+            )
             ax.annotate(
-                f"Recommended\n({rx:.2f}% ES95, {ry:.2f}% APY)",
+                f"Recommended (Cell {selected_cell.cell_id})\n({rx:.2f}% ES95, {ry:.2f}% APY)",
                 xy=(rx, ry),
                 xytext=(-120, 15),
                 textcoords="offset points",
@@ -1124,6 +1376,7 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true", help="Run quick 60-cell sweep (1,000 paths)")
     parser.add_argument("--full", action="store_true", help="Run complete grid across all generators")
     parser.add_argument("--resume", action="store_true", help="Resume incomplete sweep and append to runs.jsonl")
+    parser.add_argument("--downstream-only", action="store_true", help="Regenerate only downstream records (scenarios, benchmarks, allocation, chart, table) using existing 1080 grid cells in runs.jsonl")
     parser.add_argument("--table-only", action="store_true", help="Regenerate scenario_table.md from runs.jsonl without running simulations")
     parser.add_argument("--output-dir", type=str, default=str(DEFAULT_REPORT_DIR), help="Output directory")
     parser.add_argument("--workers", type=int, default=4, help="Number of parallel worker processes")
@@ -1133,7 +1386,56 @@ def main() -> None:
 
     if args.table_only:
         print(f"Regenerating scenario table from {out_dir / 'runs.jsonl'}...")
-        generate_scenario_table_from_runs(out_dir / "runs.jsonl", out_dir / "scenario_table.md")
+        generate_scenario_table_from_runs(runs_path=out_dir / "runs.jsonl", output_path=out_dir / "scenario_table.md")
+        return
+
+    if args.downstream_only:
+        print(f"Executing Downstream Regeneration from existing 1080 grid cells in {out_dir / 'runs.jsonl'}...")
+        runs_p = out_dir / "runs.jsonl"
+        with open(runs_p, "r", encoding="utf-8") as f:
+            all_lines = [json.loads(line) for line in f if line.strip()]
+
+        grid_records = [r for r in all_lines if r.get("run_id", "").startswith("cell_")]
+        if len(grid_records) != 1080:
+            raise RuntimeError(f"Expected 1080 grid cell records, found {len(grid_records)}")
+
+        df_grid = pd.DataFrame(grid_records)
+        df_boot = df_grid[df_grid["generator"] == "HistoricalBlockBootstrap"]
+        selected_id, top5 = select_recommended_cell(df_boot)
+        selected_cell = get_cell_config_by_id(selected_id)
+        print(f"Mechanically selected cell {selected_id}: {selected_cell}")
+
+        # Reset runs.jsonl to 1080 grid cells
+        with open(runs_p, "w", encoding="utf-8") as f:
+            for r in grid_records:
+                f.write(json.dumps(r) + "\n")
+        print(f"Reset runs.jsonl to 1080 grid cells.")
+
+        # Pre-generate paths for downstream runs
+        gen = HistoricalBlockBootstrap()
+        b_paths_10k = gen.generate(n_paths=10000, n_hours=2160, seed=42)
+
+        print("Running S1-S12 Scenario Stress Suite (Driving sim/events.py through sim/engine.py)...")
+        run_scenario_evaluations(selected_cell=selected_cell, output_dir=out_dir, n_paths=1000, seed=1337)
+
+        print("Running Benchmarks (Hold-BTC and Sentora Single-Cycle)...")
+        run_benchmarks(b_paths_10k, selected_cell=selected_cell, output_dir=out_dir, seed=42)
+
+        print("Running Allocation Extension (Carry Weights 30%, 45%, 60%)...")
+        res_rec = run_simulation(b_paths_10k, selected_cell.to_fund_config())
+        run_allocation_extension(res_rec.net_yield_btc, selected_cell=selected_cell, output_dir=out_dir, seed=42)
+
+        print("Computing and logging portfolio correlations...")
+        compute_and_log_correlations(b_paths_10k, selected_cell=selected_cell, output_dir=out_dir, seed=42)
+
+        with open(runs_p, "r", encoding="utf-8") as f:
+            updated_records = [json.loads(line) for line in f if line.strip()]
+        df_full = pd.DataFrame(updated_records)
+
+        print("Generating Efficient Frontier Chart and Data...")
+        plot_frontier_chart(df_full, selected_cell=selected_cell, output_dir=out_dir)
+
+        print("Downstream regeneration completed successfully.")
         return
 
     if args.smoke:
@@ -1183,35 +1485,31 @@ def main() -> None:
     # Run mechanical selection rule on bootstrap panel
     df_boot = df[df["generator"] == "HistoricalBlockBootstrap"]
     selected_id, top5 = select_recommended_cell(df_boot)
+    selected_cell = get_cell_config_by_id(selected_id)
 
     print("Running S1-S12 Scenario Stress Suite (Driving sim/events.py through sim/engine.py)...")
-    df_sc = run_scenario_evaluations(output_dir=out_dir, n_paths=1000)
+    df_sc = run_scenario_evaluations(selected_cell=selected_cell, output_dir=out_dir, n_paths=1000, seed=1337)
 
     # Pre-generate paths for benchmarks
     gen = HistoricalBlockBootstrap()
     b_paths = gen.generate(n_paths=n_p_prim, n_hours=2160, seed=42)
     print("Running Benchmarks (Hold-BTC and Sentora Single-Cycle)...")
-    run_benchmarks(b_paths, output_dir=out_dir, seed=42)
+    run_benchmarks(b_paths, selected_cell=selected_cell, output_dir=out_dir, seed=42)
 
     # Allocation extension runs
-    # Extract carry yields from recommended cell (cell 149)
-    cfg_rec = FundConfig(
-        target_ltv=0.702,
-        hf_full_unwind_below=1.05,
-        sleeve_split={"WBTC": 0.7, "cbBTC": 0.3},
-        deployment_cap="25%",
-        deployment_cap_pct=0.25,
-        policy_type="kpk_published",
-    )
-    res_rec = run_simulation(b_paths, cfg_rec)
     print("Running Allocation Extension (Carry Weights 30%, 45%, 60%)...")
-    run_allocation_extension(res_rec.net_yield_btc, output_dir=out_dir, seed=42)
+    res_rec = run_simulation(b_paths, selected_cell.to_fund_config())
+    run_allocation_extension(res_rec.net_yield_btc, selected_cell=selected_cell, output_dir=out_dir, seed=42)
+
+    # Correlations
+    print("Computing and logging portfolio correlations...")
+    compute_and_log_correlations(b_paths, selected_cell=selected_cell, output_dir=out_dir, seed=42)
 
     # Re-read full dataset from runs.jsonl
     df_full = pd.read_json(out_dir / "runs.jsonl", lines=True)
 
     print("Generating Efficient Frontier Chart and Data...")
-    plot_frontier_chart(df_full, output_dir=out_dir)
+    plot_frontier_chart(df_full, selected_cell=selected_cell, output_dir=out_dir)
 
     print("Sweep pipeline completed successfully.")
 

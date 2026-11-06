@@ -154,22 +154,26 @@ def test_verified_template_scenario_parameters():
 
 def test_portfolio_default_hook_feeding_scenario_s6():
     """Verify sim/portfolio.py counterparty table feeds S6 default loss."""
-    table = CounterpartyTable.create_default(total_fund_usd=50_000_000.0)
+    # 1. Template roster ($10M vault exposure)
+    table_tmpl = CounterpartyTable.create_default(total_fund_usd=50_000_000.0, basis="template")
+    default_res_tmpl = table_tmpl.apply_default("kpk_usdc_yield_vault", loss_severity=0.65)
+    assert default_res_tmpl["entity"] == "kpk_usdc_yield_vault"
+    assert default_res_tmpl["loss_severity"] == 0.65
+    assert abs(default_res_tmpl["prior_exposure_usd"] - 10_000_000.0) < 1e-6
+    assert abs(default_res_tmpl["loss_usd"] - 6_500_000.0) < 1e-6
+    assert abs(default_res_tmpl["remaining_exposure_usd"] - 3_500_000.0) < 1e-6
 
-    # Let deployment destination kpk_usdc_yield_vault default with 65% loss
-    default_res = table.apply_default("kpk_usdc_yield_vault", loss_severity=0.65)
-
-    assert default_res["entity"] == "kpk_usdc_yield_vault"
-    assert default_res["loss_severity"] == 0.65
-    # Initial exposure was $10M (20% of $50M)
-    assert abs(default_res["prior_exposure_usd"] - 10_000_000.0) < 1e-6
-    # 65% loss = $6.5M
-    assert abs(default_res["loss_usd"] - 6_500_000.0) < 1e-6
-    # Remaining exposure is $3.5M
-    assert abs(default_res["remaining_exposure_usd"] - 3_500_000.0) < 1e-6
+    # 2. Selected redesign roster ($5.265M vault exposure: 1/3 of $15.795M borrowed USDC)
+    table_sel = CounterpartyTable.create_default(total_fund_usd=50_000_000.0, basis="selected")
+    default_res_sel = table_sel.apply_default("kpk_usdc_yield_vault", loss_severity=0.65)
+    assert default_res_sel["entity"] == "kpk_usdc_yield_vault"
+    assert default_res_sel["loss_severity"] == 0.65
+    assert abs(default_res_sel["prior_exposure_usd"] - 5_265_000.0) < 1e-6
+    assert abs(default_res_sel["loss_usd"] - (5_265_000.0 * 0.65)) < 1e-6
+    assert abs(default_res_sel["remaining_exposure_usd"] - (5_265_000.0 * 0.35)) < 1e-6
 
     # Feed loss into S6 scenario
-    loss_fraction_of_sleeve = default_res["loss_severity"]
+    loss_fraction_of_sleeve = default_res_sel["loss_severity"]
     s6 = S6OpaqueCounterpartyDefault(loss_pct=loss_fraction_of_sleeve, discovery_lag_hours=168)
     st = s6.apply(ScenarioState())
     assert st.vault_loss == 0.65

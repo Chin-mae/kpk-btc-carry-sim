@@ -41,7 +41,7 @@ S3:
 
 S4:
   id: "S4"
-  name: "Wrapper depeg"
+  name: "Held-wrapper depeg"
   source: "Kelp rsETH exploit, 18 Apr 2026 (pattern)"
   affected_state:
     - "wrapper_price_ratio"
@@ -104,13 +104,11 @@ S8:
   affected_state:
     - "oracle_reported_price"
     - "oracle_stale"
-  trigger: "Heartbeat breach or erroneous price feed print"
+  trigger: "Erroneous price feed print (-5% for 3 hours)"
   magnitude:
-    stale_duration_hours: 24
-    catchup_jump_pct: -0.12
     false_print_pct: -0.05
     false_print_duration_hours: 3
-  duration_hours: 24
+  duration_hours: 3
 
 S9:
   id: "S9"
