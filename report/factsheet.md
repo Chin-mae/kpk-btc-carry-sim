@@ -1,34 +1,54 @@
-# KPK BTC Carry Fund — Institutional Risk & Strategy Factsheet
-**Scale:** $50M Design Scale (Parameterised from 13.4 WBTC Live Reference to $320M Benchmark)  
-**Date:** November 2026 | **Version:** 1.0  
-**Engine:** Gauntlet-Style Agent-Based Monte Carlo Engine (10,000 paths × 90 days hourly)  
-**Commit Traceability:** Logged bit-for-bit to `report/runs.jsonl`
+# KPK BTC Carry Fund: Institutional Risk and Strategy Factsheet
+
+**Scale:** $50,000,000 USD Institutional Design Scale  
+**Date:** 6 November 2026  
+**Author:** Chinmay Gupta  
+**Engine:** Agent-Based Monte Carlo Engine (10,000 paths x 90 days hourly)  
+**Traceability:** Fully reproducible; logged to `report/runs.jsonl` (git commit `7b809d8b`)
 
 ---
 
-## 1. Executive Summary & Strategy Overview
-The **KPK BTC Carry Fund** is an institutional market-neutral yield strategy designed to extract onchain yield on Bitcoin collateral without taking directional market risk. The fund supplies wrapped Bitcoin (`WBTC`, `cbBTC`) to prime lending venues (`Aave v3 Core`, `Aave v4 Bluechip`, `Morpho Markets`), borrows `USDC`, and deploys the borrowed liquidity into curated lending vaults (`KPK USDC Yield Vault`, `KPK USDC Yield RWA Vault`, `Yo USD`).
+## 1. Strategy Overview and Selected Configuration
 
-This factsheet summarizes the results of a comprehensive 360-cell Monte Carlo parameter sweep across 10,000 paths, stress testing the published KPK template against historical cascade replays (10 Oct 2025, 29 Oct 2026 Binance freeze) and institutional risk redesigns.
+The **KPK BTC Carry Fund** is an institutional market-neutral yield strategy designed to harvest lending yield spreads on Bitcoin collateral. The fund supplies wrapped Bitcoin (`WBTC`, `cbBTC`) to prime lending venues (`Aave v3 Core`), borrows `USDC` up to a disciplined Loan-to-Value, and deploys the borrowed liquidity into curated lending vaults (`kpk_usdc_yield_vault`, `kpk_usdc_yield_rwa_vault`, `yo_ecosystem_yousd`).
 
-| Metric | Published KPK Template | Institutional Recommended Setting | Delta / Benefit |
+The objective mechanical selection rule (filter $P(\text{liquidation})=0$ and 5th percentile minimum health factor $\ge 1.10$, ranking by carry ES95 loss ascending then median net APY descending) selected **Cell 149**:
+
+| Parameter / Metric | Published Template (Cell 163) | Recommended Setting (Cell 149) | Structural Shift and Rationale |
 | :--- | :--- | :--- | :--- |
-| **Target LTV** | **70.2%** | **60.0%** | **−10.2%** (Equity buffer expands from 17.4% to 29.4%) |
-| **Initial Health Factor** | 1.210 | 1.417 | **+17.1%** safety cushion above liquidation |
-| **HF Full Unwind Floor** | 1.130 | 1.100 | Prevents premature panic unwinds |
-| **Collateral Sleeve Split** | 100% WBTC : 0% cbBTC | **50% WBTC : 50% cbBTC** | Wrapper Issuer HHI drops from 1.000 to **0.500** |
-| **Deployment Cap per Vault**| None (Uncapped) | **25% of Vault TVL** | Eliminates single-vault default ruin (>75% loss reduction) |
-| **Policy Engine** | Static KPK Published Triggers | **KPK + Volatility-Scaled LTV** | Auto-trims debt when 7d realised vol >65% |
-| **Carry Sleeve Net BTC APY**| **1.88%** | **1.70%** | Yield sacrifice of only **18 bps** for massive tail protection |
-| **P(Policy Unwind)** | **28.27%** | **21.65%** | **−23.4%** reduction in execution turnover/fees |
-| **Min Health Factor (p5)** | **1.124** (breaches 1.13) | **1.140** (comfortably holds) | Zero breach of the 1.10 unwind floor |
-| **P(Liquidation)** | 0.00% | 0.00% | Zero liquidations across all standard paths |
-| **Portfolio Net APY (Fund)** | **3.39%** | **3.31%** | Negligible 8 bps impact on multi-strategy book |
+| **Target LTV** | **70.2%** | **70.2%** | Leverage retained; distance to liquidation is 17.41% |
+| **HF Full Unwind Floor** | **1.13** | **1.05** | Prevents false-alarm unwinds during transient market dips |
+| **Collateral Split** | 100% WBTC : 0% cbBTC | **70% WBTC : 30% cbBTC** | Diversifies custodian and wrapper bridge exposure |
+| **Deployment Cap per Vault**| None (Uncapped) | **25% of Vault TVL** | Eliminates single-vault default ruin (>8% to 12% tail protection) |
+| **Execution Policy** | `kpk_published` | **`kpk_published`** | Standard published policy retained |
+| **Carry Sleeve Net BTC APY**| 1.8843% | **1.9373%** | +5.3 bps yield increase from reduced unwind churn |
+| **P(Policy Unwind)** | 28.27% | **21.64%** | -6.63 percentage points reduction in execution turnover/fees |
+| **Min Health Factor (p5)** | 1.1241 (breaches 1.13) | **1.1240** (holds > 1.05) | Holds comfortably above the 1.05 floor |
+| **P(Liquidation)** | 0.00% | **0.00%** | Zero liquidation on standard paths (pre-empted by unwind floor) |
+| **Portfolio Net APY** | 3.3948% | **3.4189%** | +2.4 bps portfolio yield increase |
 
 ---
 
-## 2. Multi-Strategy Sleeve Allocation (§11 Prior vs Frontier)
-The fund implements a 4-sleeve multi-strategy structure with a binding 20% liquid T-bill floor to support redemptions and margin buffers:
+## 2. Three-Panel Results in Miniature
+
+Cross-generator results are reported independently across all three simulation panels (unblended):
+
+| Panel (Path Count) | Configuration | Carry Net APY | Carry ES95 Loss % | P(Unwind) | Min-HF (p5) | Portfolio Net APY |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Historical Bootstrap** (10,000 paths) | Template (Cell 163) | 1.8843% | -0.0359% | 28.27% | 1.1241 | 3.3948% |
+| | **Recommended (Cell 149)** | **1.9373%** | **-0.0737%** | **21.64%** | **1.1240** | **3.4189%** |
+| **Jump Diffusion** (5,000 paths) | Template (Cell 163) | 2.1417% | -0.0602% | 18.00% | 1.1224 | 3.5119% |
+| | **Recommended (Cell 149)** | **2.2187%** | **-0.2015%** | **7.80%** | **1.1222** | **3.5469%** |
+| **Regime-Switching** (5,000 paths) | Template (Cell 163) | 1.9650% | -0.0335% | 35.74% | 1.1242 | 3.4315% |
+| | **Recommended (Cell 149)** | **2.0230%** | **-0.0521%** | **30.44%** | **1.1242** | **3.4579%** |
+
+*Note on standard paths:* The ES95 risk axis is compressed (negative loss indicates net positive returns) because automated health factor unwinds truncate losses before principal impairment occurs. Similarly, $P(\text{liquidation})=0.00\%$ is structural on standard paths because the fund agent unwinds when HF falls below 1.05, well before liquidation at $\text{HF} < 1.00$.
+
+---
+
+## 3. Multi-Strategy Sleeve Allocation and Assumptions Summary
+
+The fund operates a 4-sleeve structure sized to $50,000,000 USD total equity:
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -36,55 +56,58 @@ The fund implements a 4-sleeve multi-strategy structure with a binding 20% liqui
 +------------------------------------+------------------+-------------+-------------+
 |        Lending Carry Sleeve        |   Basis Sleeve   | AMM Sleeve  |   T-Bills   |
 |         45.0% ($22.5M)             |  20.0% ($10.0M)  | 15% ($7.5M) | 20% ($10M)  |
-|  50:50 WBTC:cbBTC -> Aave v3 Core  |  [GATE ACTIVE]   | Uniswap v3  | FRED DTB3   |
-|     60% LTV -> Morpho Vaults       | Funding (2.2%) < | WBTC/USDC   | 4.03% Yield |
-|     1.70% Net BTC APY (Median)     | T-Bill (4.03%)   | Fee Yield   | Liquid Cash |
-|                                    | -> Parks in Cash | 6.00% APY   | T+1 Buffer  |
+|  70:30 WBTC:cbBTC -> Aave v3 Core  |  [GATE ACTIVE]   | Uniswap v3  | FRED DTB3   |
+|   70.2% LTV -> Morpho Vaults       | Funding (2.2%) < | WBTC/USDC   | 4.03% Yield |
+|     1.94% Net BTC APY (Simulated)  | T-Bill (4.03%)   | Fee Yield   | Liquid Cash |
+|     BTC Downside Directional Risk  | -> Parks in Cash | 6.00% APY   | T+1 Buffer  |
 +------------------------------------+------------------+-------------+-------------+
 ```
 
-- **Basis Sleeve Gate:** In 2026, perpetual funding rates compressed to 2.2% annualised, falling below the 3-month US Treasury Bill rate (4.03% DTB3). When the basis gate is active, capital is redirected into risk-free 4.03% T-bills, expanding effective cash liquidity from 20% to **40%** and preventing yield drag.
-- **AMM Sleeve Capacity:** Single-pool depth caps institutional AMM deployment at single-digit millions (~$7.5M / 15%). Larger weights create prohibitive market impact and LVR.
+### Sleeve Assumptions Table
+- **T-Bill Reserve (40.0% Active / $20.0M):** 4.03% APY. Source: FRED series `DTB3` (`data/raw/dtb3.csv`), secondary market rate dated 3 Nov 2026. 2023 to 2026 range: 3.52% to 5.36% (mean 4.49%).
+- **Basis Sleeve (0.0% Active / Gated to T-Bills):** 2.20% APY. Source: Observed 2026 Ethena/CeFi perpetual funding rate compression, labelled as an empirical proxy. The automated gate redirects capital to 4.03% T-bills when funding spread falls below risk-free rates.
+- **AMM Sleeve (15.0% / $7.5M):** 6.00% APY. Assumed parameter; dedicated AMM simulation sub-engine remains future work.
+- **Carry Sleeve (45.0% / $22.5M):** 1.9373% net BTC APY. Simulated output from Cell 149 under Historical Block Bootstrap.
 
 ---
 
-## 3. Efficient Frontier Summary (SPEC §6.5)
-Across 360 parameter combinations evaluated on 10,000 paths (Historical Block Bootstrap) and 5,000 paths (Jump Diffusion & Regime Switching), the recommended configuration occupies the optimal "kink" on the frontier:
+## 4. Scenario Stress Testing Headlines (SPEC §6.4: S1 to S12)
 
-![Efficient Frontier](report/frontier.png)
+Evaluated across 1,000 paths with deterministic historical event shocks:
 
-- **The Convexity Trade-off:** Increasing target LTV from 60.0% to 70.2% increases net carry yield by only +18 bps (1.70% to 1.88%), but shrinks the distance to liquidation by **40.8%** (from 29.4% down to 17.4%).
-- **Policy Scaling Advantage:** Volatility-scaled LTV shifts the entire frontier upwards and to the left by preventing liquidations during market turbulence without penalizing calm-regime returns.
-
----
-
-## 4. Scenario Stress Testing Headlines (SPEC §6.4: S1–S12)
-Tail loss evaluated under 1,000 paths with deterministic historical event shocks:
-
-| Scenario | Historical Source | Template ES95 Loss | Rec ES95 Loss | Protection Gain | Core Mechanism & Headline |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **S1 Flash Crash** | 10 Oct 2025 Cascade | 1.84% | **-0.01%** | **+1.85%** | 60% LTV has 29.4% buffer; absorbs -14% crash without liquidations. |
-| **S2 Sustained Crash** | Mar 2020 / LUNA 2022 | 8.41% | **3.87%** | **+4.54%** | Vol-scaled LTV trims debt before -45% macro plunge bottoms out. |
-| **S3 Venue Freeze** | Binance Hack 29 Oct 2026 | 2.14% | **-0.01%** | **+2.15%** | 12h freeze safely absorbed by 1.417 HF cushion; zero insolvency. |
-| **S4 Wrapper Depeg** | Kelp rsETH Pattern | 4.97% | **2.45%** | **+2.52%** | 50:50 WBTC:cbBTC split strictly halves single-wrapper depeg shock. |
-| **S5 Vault Exploit** | Resolv (22 Mar 2026) | 15.50% | **3.63%** | **+11.87%** | 25% vault cap prevents single-vault exploit from consuming portfolio. |
-| **S6 Opaque Default** | Stream Finance / xUSD | 22.79% | **5.37%** | **+17.42%** | 65% lagged vault default strictly capped at single-vault deposit cap. |
-| **S7 Utilisation Crunch** | EURC Crunch (KPK Vault) | 3.62% | **0.77%** | **+2.85%** | 20% liquid T-bill buffer services debt without forced collateral fire-sales. |
-| **S8 Oracle Failure** | Generic Tier Criteria | 4.11% | **-0.01%** | **+4.12%** | Conservative HF buffer prevents false -5% prints from triggering unwinds. |
-| **S9 Stablecoin Depeg** | USDC SVB (Mar 2023) | -0.03% | **-0.05%** | **+0.02%** | 0.5% peg trigger unwinds cleanly; debt repaid whole at par/discount. |
-| **S10 Negative Carry** | 2026 Compression | 0.92% | **-0.05%** | **+0.97%** | Basis gate auto-switches to 4.03% T-bills, eliminating funding bleed. |
-| **S11 Gas War** | Historical Crisis Gas | 2.42% | **0.35%** | **+2.07%** | 29.4% cushion tolerates 12h transaction delays & 35% failure rates. |
-| **S12 Correlated Shock**| Composite (S1+S3+S4) | **26.39%** | **3.14%** | **+23.25%** | **Template suffers catastrophic liquidation; Rec book survives whole.** |
+| ID | Scenario | Template ES95 | Rec ES95 | Protection Gain | Computed P(Liq) [T vs R] | Two-Minute Takeaway |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **S1** | Flash crash (-14% intraday) | +3.39% | **-0.01%** | **+3.40%** | 4.0% vs 0.0% | Template incurs 4.0% liquidations; redesigned execution eliminates liquidations via complete unwind. |
+| **S2** | Sustained crash (-45% 72h) | -0.01% | **-0.01%** | **0.00%** | 0.0% vs 0.0% | Orderly multi-day unwind (P(unwind) 100%) preserves capital across both setups with zero liquidations. |
+| **S3** | Venue freeze (12h Aave freeze)| -0.03% | **-0.05%** | **+0.03%** | 0.0% vs 0.0% | Zero liquidations; lower 1.05 unwind floor cuts unnecessary unwind churn from 30.0% to 22.4%. |
+| **S4** | Wrapper depeg (-5% cbBTC) | +4.99% | **+2.49%** | **+2.50%** | 0.0% vs 0.0% | cbBTC -5% depeg produces +4.99% ES95 loss in 100% WBTC book; wrapper split halves loss to +2.49%. |
+| **S5** | Vault exploit (44.25% Resolv) | +20.59% | **+11.84%** | **+8.75%** | 0.0% vs 0.0% | 25% vault cap prevents single-vault exploit from consuming entire deployment (loss cut from 20.6% to 11.8%). |
+| **S6** | Counterparty default (65% xUSD)| +29.72% | **+17.62%** | **+12.10%** | 0.0% vs 0.0% | 25% vault cap insulates against destination insolvency, reducing ES95 tail loss from +29.72% to +17.62%. |
+| **S7** | Utilisation crunch (100% util) | +0.17% | **+0.11%** | **+0.06%** | 0.0% vs 0.0% | Trapped vault liquidity and rate spikes absorbed without liquidation; 1.05 floor cuts churn to 22.3%. |
+| **S8** | Oracle failure (-5% print 3h) | -0.01% | **-0.05%** | **+0.04%** | 0.0% vs 0.0% | False -5% print triggers zero liquidations; 1.05 floor reduces false-alarm unwinds from 36.7% to 22.6%. |
+| **S9** | Stablecoin depeg (-13% USDC) | -0.01% | **-0.01%** | **0.00%** | 0.0% vs 0.0% | USDC -13% discount allows debt repayment at parity or discount during intraday recovery. |
+| **S10** | Negative carry (30-day inversion)| -0.00% | **-0.00%** | **0.00%** | 0.0% vs 0.0% | Negative spread triggers 100% unwind, cutting debt interest accrual and parking capital in T-bills. |
+| **S11** | Gas war (25x gas, 35% tx fail) | -0.03% | **-0.05%** | **+0.02%** | 0.0% vs 0.0% | High gas and 35% tx failures cause zero insolvencies; lower unwind floor limits failed rebalance gas costs. |
+| **S12** | Correlated shock (S1+S3+S4) | +9.00% | **+2.49%** | **+6.51%** | 65.5% vs 0.0% | Template suffers 65.5% liquidation rate; redesign eliminates liquidations and caps ES95 loss at +2.49%. |
 
 ---
 
-## 5. Construction & Rebalancing Instructions (JD Line 4)
-Institutional execution instructions for portfolio managers and automated execution bots:
+## 5. Construction and Rebalancing Summary
 
-1. **Collateral Sizing:** Deposit 50% WBTC and 50% cbBTC (250 BTC each at $100k BTC design price = $50M total). Verify custodian multisig thresholds and contract ownership before entry.
-2. **Borrowing Parameters:** Borrow USDC on Aave v3 Core Ethereum at **60.0% Target LTV** (HF 1.417). Max initial borrowing is $30.0M USDC.
-3. **Deployment Vault Routing:** Allocate borrowed USDC across approved Morpho vaults (`kpk_usdc_yield_vault`, `kpk_usdc_yield_rwa_vault`, `yo_ecosystem_yousd`), enforcing a **strict 25% vault TVL cap** ($12.5M max per $50M vault). Route any overflow liquidity to liquid FRED DTB3 T-bills.
-4. **Automated Deleveraging Band:** If HF dips into `[1.10, 1.25)`, execute automated partial deleveraging via Flash Repay to restore HF to 1.417.
-5. **Full Unwind Trigger Floor:** If HF breaches **1.10**, execute immediate full clean unwind.
-6. **Dynamic Volatility Scaling:** If 7-day annualised realised volatility exceeds **65%**, automatically scale target LTV down towards 50.0% (`scale = min(1.0, 0.65 / vol_7d)`).
-7. **Emergency Unwind Triggers:** Execute immediate full unwind upon: (i) BTC -10%/24h; (ii) wrapper peg deviation $\ge 1.0\%$ sustained $\ge 40$ min; (iii) USDC depeg $\ge 0.5\%$; (iv) negative carry for two consecutive 6h windows; (v) venue freeze signal.
+Parameters sized to the 45% carry sleeve of the $50,000,000 USD fund ($22.5M collateral equity):
+
+1. **Collateral Sizing:** Supply 70% WBTC ($15.75M = 157.5 BTC at $100k BTC design price) and 30% cbBTC ($6.75M = 67.5 BTC) to Aave v3 Core Ethereum.
+2. **Borrowing Parameters:** Borrow USDC at **70.2% Target LTV** ($15,795,000 USDC borrowed against $22.5M collateral equity), targeting an initial Health Factor of **1.210**.
+3. **Deployment Routing:** Allocate the borrowed $15.795M USDC across approved Morpho vaults (`kpk_usdc_yield_vault`, `kpk_usdc_yield_rwa_vault`, `yo_ecosystem_yousd`), enforcing a **strict 25% vault TVL cap** ($5.265M maximum per vault).
+4. **Automated Deleveraging Band:** If HF declines into the band `[1.08, 1.15)`, initiate automated partial repayment via flash unwind to restore HF to 1.21.
+5. **Full Unwind Floor Trigger:** If HF breaches **1.05**, execute immediate full clean unwind, repaying outstanding USDC debt and returning BTC collateral to reserve.
+
+---
+
+## 6. Limitations in Brief (SPEC §7)
+
+- **Hourly Simulation Resolution:** Evaluated at 1-hour time-steps versus live agent reactions of approximately 12 seconds. Sub-hourly volatility spikes could introduce execution slippage.
+- **Structural Liquidation Absence on Standard Paths:** On unshocked paths, $P(\text{liquidation})=0.00\%$ because the unwind floor pre-empts liquidation. Tail risk differentiation is observable under injected scenario shocks.
+- **Scenario Severities:** Scenario table figures represent middle headline severities; multi-severity variants are logged in `report/runs.jsonl`.
+- **Partly Assumed Yields:** AMM sleeve yield (6.00%) and basis funding proxy (2.20%) are based on empirical parameters rather than dedicated microstructure simulation sub-engines.
+- **Decision Support:** Models fat tails without eliminating tail risk. Outputs serve as quantitative risk guidance rather than an absolute solvency guarantee.
