@@ -1089,7 +1089,7 @@ def main() -> None:
         n_p_prim = 10000
         n_p_rob = 5000
 
-    should_resume = args.resume or (args.full and (out_dir / "runs.jsonl").exists())
+    should_resume = args.resume
 
     print(f"Launching Sweep ({len(cells)} cells across 3 generators, resume={should_resume})...")
     df, _ = run_full_sweep(
