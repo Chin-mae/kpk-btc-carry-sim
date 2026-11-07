@@ -9,7 +9,7 @@ description = "Gauntlet-style Monte Carlo risk engine for KPK BTC Carry Fund at 
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-    { name = "KPK Quant Risk Team" }
+    { name = "Chinmay Gupta" }
 ]
 dependencies = [
     "numpy>=2.0.0",

@@ -1,147 +1,66 @@
-# KPK BTC Carry Simulation Engine (Phase 1 Core + Phase 2 Agents & Events)
+# BTC Carry Fund: Agent-Based Monte Carlo Risk Simulation
 
-Gauntlet-style agent-based Monte Carlo risk engine for evaluating an institutional-scale ($50M) BTC carry fund across thousands of simulated futures.
+A Gauntlet-style, agent-based Monte Carlo engine that stress-tests the design of a Bitcoin carry fund at institutional scale, built as a quantitative research proof of work. The fund under test follows KPK's published BTC Carry template: BTC collateral posted on Aave, USDC borrowed against it at a target loan-to-value, and the borrowed USDC deployed into curated yield vaults, with the spread converted back to BTC.
 
-Implements **Phase 1 (Core Engine)** and **Phase 2 (Agent Populations, S1–S12 Event Library, Historical Replays, and Portfolio Risk)** per governing specification `docs/SPEC.md` (v0.3).
+The engine sweeps 1,080 parameter combinations across three price generators, drives the fund through a 12-scenario event library built from real incidents (exchange hacks, wrapper depegs, oracle failures, counterparty defaults, liquidation cascades), and models liquidators, depositors and arbitrageurs as agents alongside the fund's own exit agent, which implements KPK's published unwind triggers. Every reported number traces to a logged simulation run in `report/runs.jsonl`; nothing in the reports is asserted without a run behind it.
 
----
+Author: Chinmay Gupta. Companion analysis of the vault-curation side (MAVERIK, a position-level stress engine run on KPK's live Morpho Prime vaults) is available separately.
 
-## Strategy & Parameter Provenance
+## Start here
 
-All strategy parameters are loaded from `configs/fund_template.yaml` and were **verified on 5 Nov 2026** against primary `docs.kpk.io` documentation:
-- **WBTC Carry Fund**: [https://docs.kpk.io/funds/funds/wbtc-carry](https://docs.kpk.io/funds/funds/wbtc-carry) (thresholds verified as of 1 Nov 2026)
-- **cbBTC Carry Fund**: [https://docs.kpk.io/funds/funds/cbbtc-carry](https://docs.kpk.io/funds/funds/cbbtc-carry) (thresholds verified as of 4 Nov 2026)
+| Document | What it is |
+| :--- | :--- |
+| [report/memo.md](report/memo.md) | The full risk memo: fund design, method, replay validations, frontier, scenario results, portfolio risk, recommendations and stated limitations |
+| [report/factsheet.md](report/factsheet.md) | Short summary of the design and results |
+| [report/scenario_table.md](report/scenario_table.md) | The generated S1 to S12 scenario table (template vs recommended, 1,000 paths each) |
+| [report/calibration.md](report/calibration.md) | Generator calibration against Jan 2023 to Oct 2026 BTC history, with the misses disclosed |
+| [report/frontier.png](report/frontier.png) | Efficient frontier chart across all 1,080 swept cells |
+| [docs/SPEC.md](docs/SPEC.md) | The governing build specification (v0.3), including the venue-liveness gate in §13.3 |
 
-### Venue Liveness Gate & Exclusion Rule
-Per **SPEC §13.3 (Venue-Liveness Gate)**, protocols must be actively operating and solvent to qualify as live venues:
-- Sunset/wind-down venues (e.g. BIP-928) are **permanently excluded** from live portfolio construction.
-- Active lending venue: **Aave v3 Core (Ethereum)** with LLTV 0.85 and target LTV 0.702 (WBTC / cbBTC collateral; USDC debt).
-- Replay venue: **Aave V4 Bluechip** with LLTV 0.845 and target LTV 0.698 (venue active during 29 Oct 2026 freeze).
+## Headline results
 
----
+Parameters were selected by a disclosed mechanical rule (filter, then rank), not by hand. On the primary block-bootstrap panel (10,000 paths per cell):
 
-## Phase 2 Components
+| Metric | KPK published template (Cell 163) | Recommended (Cell 149) |
+| :--- | :--- | :--- |
+| Target LTV | 70.2% | 70.2% |
+| Health factor unwind floor | 1.13 | 1.05 |
+| Collateral mix | 100% WBTC | 70:30 WBTC to cbBTC |
+| Median carry APY | 1.8843% | 1.9373% |
+| Unwind probability, standard paths | 28.27% | 21.64% |
+| Portfolio APY (45% carry allocation) | 3.3948% | 3.4189% |
 
-### 1. Agent Populations (`sim/agents.py`)
-Per SPEC §3.3:
-- **Fund Agent**: Executes the full verified trigger list:
-  - Full unwind: HF < 1.13; BTC 24h drop <= -10%; two consecutive 6h negative-carry windows; wrapper peg off 1% sustained 40 min; USDC off peg 0.5%; exploit detection on venue/oracle; venue freezes reserve or sets LTV to 0; venue changes price source; custodian multisig threshold set to 1 (WBTC); cbBTC owner/proxy/pauser change.
-  - Partial action (`VAULT_EXIT`): deployment vault curator changes, or vault share price drops > 1 bp/min (exits that vault, redeploys or holds USDC; NOT a full unwind).
-  - Deleveraging: HF restored to target 1.21 when entering [1.13, 1.15).
-- **Liquidator Agents (`LiquidatorPopulation`)**: Heterogeneous bot population across capital, gas bids, and profit thresholds. Liquidates positions with HF < 1.0 using standard 50% close factor only when net profit exceeds threshold after gas and slippage. Skips small positions during gas wars.
-- **Background Borrowers (`BorrowerPopulation`)**: Drives Aave USDC pool utilisation; panic-deleveraging and margin seizures generate liquidation cascades during market stress.
-- **Depositors (`DepositorPopulation`)**: Simulates vault depositor runs in stress regimes, surging utilisation to 100% and blocking withdrawals (the EURC trapped liquidity mechanism).
-- **Arbitrageurs (`ArbitrageurPopulation`)**: Restores wrapper pegs at speed proportional to discount and capital. Under hack scenarios, capital halves due to redemption halts.
+Scenario results that carry the argument (ES95 tail loss / liquidation probability, recommended vs template):
 
-### 2. Scenario Shock Library (`sim/events.py` & `configs/scenarios.yaml`)
-Injects S1–S12 scenarios per SPEC §4:
-- **S1 (Flash crash)**: BTC -14% intraday path, borrower liquidation cascade, gas 20x for 6h.
-- **S2 (Sustained crash)**: Multi-day -40%/-50% paths via bootstrap blocks.
-- **S3 (Venue freeze)**: Aave market frozen T hours (1h, 12h, 72h).
-- **S4 (Wrapper depeg)**: cbBTC or WBTC trades -3% / -5% / -8% for 6–48h; arbitrageur capital halved.
-- **S5 (Collateral-issuer exploit)**: Resolv-style exploit: oracle marks $1.13 while market trades $0.63.
-- **S6 (Opaque counterparty default)**: Stream Finance / xUSD-style default: 30% / 65% / 100% loss discovered with 7-day lag.
-- **S7 (Utilisation crunch)**: EURC-style crunch: deployment vault utilisation -> 100% for 24–96h; withdrawals blocked.
-- **S8 (Oracle failure)**: Oracle stale for 24h then -12% catch-up jump, or prints -5% wrong for 3h.
-- **S9 (Stablecoin depeg)**: USDC -13% intraday, recovers in 48h.
-- **S10 (Negative carry)**: Borrow rate exceeds deployment yield for 30–90 days.
-- **S11 (Gas war)**: Gas 10–50x for 12h; liquidators skip small positions; transactions queue.
-- **S12 (Correlated failure)**: Composite S1 + S3 + S4 (crash during freeze with wrapper depeg).
+- **S12 composite (crash + venue freeze + wrapper depeg):** +5.65% / 10.8% vs +9.00% / 65.5%. The redesign earns its keep here.
+- **S4 held-wrapper depeg:** +1.49% vs +4.99%. The 70:30 collateral split works as intended.
+- **S1 flash crash:** +3.39% / 4.0% for both settings. At identical leverage the redesign offers no protection in a pure crash, and the memo says so.
 
-*Contract Invariant*: Each scenario injector modifies **exactly** its declared state variables and no others.
+Validation: the engine replays KPK's documented 29 October 2026 venue-freeze unwind and reproduces the outcome exactly (277,337 USDC repaid, 4.925 WBTC returned, zero liquidation loss). That is a mechanics-consistency validation, not an independent forecast, and the memo labels it as such. Calibration verdict is partial: the bootstrap generator passes all checks, the jump-diffusion and regime-switching generators miss the strict volatility-clustering tolerance. Both limitations are documented in the memo rather than smoothed over, as is the withdrawal of an earlier draft of this work that failed internal adversarial review.
 
-### 3. Portfolio Risk Module (`sim/portfolio.py`)
-Per SPEC §13.1:
-- Exposure shares by venue, asset, and issuer / custodian.
-- Herfindahl-Hirschman Index (HHI) concentration calculations.
-- Named counterparty table (Aave Core, Morpho, Gearbox, KPK yield vaults, Coinbase, BitGo, Deribit, US Treasury).
-- Loss-given-default hooks consumed directly by S5 and S6 scenario injectors.
+## Repository layout
 
-### 4. Replay Validations (`tests/test_replay_oct2025.py`)
-Per SPEC §7:
-- **Replay 1 (29 Oct 2026 Binance Hack)**: Position on Aave V4 (LLTV 84.5%, target LTV 69.8%, 4.925 WBTC, 277,337 USDC debt). With a freeze applied to a DIFFERENT venue, fund agent executes clean full unwind with zero liquidation loss (repaid 277,337 USDC, returned 4.925 WBTC whole), reproducing KPK's real-world outcome.
-- **Replay 2 (10 Oct 2025 Liquidation Arithmetic)**: On recorded path with S1 cascade, at target LTV 70.2% min HF approaches 1.0 within one hourly step of the theoretical liquidation point (17.41% fall); at 60% LTV the position strictly survives (min HF ~1.170 > 1.0, zero liquidations).
+- `sim/` — the engine: price generators (`prices.py`), Aave kinked rates (`rates.py`), venue and oracle model (`venue.py`), agent populations (`agents.py`), the S1 to S12 event injectors (`events.py`), portfolio risk (`portfolio.py`), metrics (`metrics.py`) and the sweep and reporting runner (`sweep.py`)
+- `configs/` — the verified fund template (`fund_template.yaml`, checked against docs.kpk.io on 5 Nov 2026) and scenario definitions (`scenarios.yaml`)
+- `data/` — data pull script, provenance note, and the raw series used (Coinbase BTC/USD hourly, Jan 2023 to Oct 2026; DTB3 Treasury bill rates)
+- `notebooks/` — the calibration notebook
+- `report/` — memo, factsheet, scenario table, calibration note, frontier chart and data, and `runs.jsonl`, the full run log (1,126 records)
+- `tests/` — 58 tests, including liquidation math, no-lookahead, seed reproducibility, replay checks, and a guard that fails if any downstream record's configuration differs from the selected cell
 
----
+## Reproduce
 
-## Repo Layout
-
-```
-kpk-carry-sim/
-├── README.md                          # Engine documentation & instructions
-├── pyproject.toml                     # Python >= 3.11 build configuration & deps
-├── configs/
-│   ├── fund_template.yaml             # Verified KPK published parameters (source-cited)
-│   └── scenarios.yaml                 # S1–S12 scenario parameter blocks
-├── data/
-│   ├── pull_data.py                   # Data ingestion: Coinbase BTC/USD candles + FRED DTB3
-│   ├── PROVENANCE.md                  # SHA256 checksums, timestamps, row counts, source URLs
-│   └── raw/                           # Cached raw data (idempotent)
-│       ├── btc_usd_hourly.csv         # 33,588 hourly candles (Jan 2023 - Oct 2026)
-│       └── dtb3.csv                   # Daily 3-month Treasury bill rate series
-├── sim/
-│   ├── __init__.py                    # Public API exports
-│   ├── prices.py                      # Three generators: Block Bootstrap, Jump Diffusion, Regime-Switching (§3.1)
-│   ├── rates.py                       # Aave v3 kinked IRM + vault APY own-size dilution model (§3.1)
-│   ├── venue.py                       # Aave pool state tracker, liquidation math, Chainlink oracle model (§3.2)
-│   ├── agents.py                      # Fund Agent + Liquidators, Borrowers, Depositors, Arbitrageurs (§3.3)
-│   ├── events.py                      # S1–S12 scenario shock injectors + historical replay loaders (§3.4, §4)
-│   ├── portfolio.py                   # Portfolio risk metrics, HHI concentration, counterparty default hooks (§13.1)
-│   ├── engine.py                      # Vectorised hourly path runner and position simulator (§3.1–§3.3)
-│   └── metrics.py                     # Distribution outputs: median, p5/p95, P(loss), P(liq), ES95 (§6)
-├── tests/
-│   ├── test_liquidation_math.py       # Hand-checkable liquidation arithmetic (LTV 0.702 vs 0.60) (§7)
-│   ├── test_no_lookahead.py           # Zero look-ahead verification across truncation horizons (§7)
-│   ├── test_seed_reproducibility.py   # Bit-for-bit seed reproducibility across generators and engine (§1)
-│   ├── test_events.py                 # S1–S12 state mutation invariants & composition tests (§4)
-│   ├── test_replay_oct2025.py         # Replay 1 (29 Oct 2026) & Replay 2 (10 Oct 2025) validations (§7)
-│   ├── test_portfolio.py              # Portfolio concentration shares, HHI, and counterparty default hooks (§13.1)
-│   └── test_fund_agent_triggers.py    # Extended verified triggers & VAULT-EXIT partial action checks
-└── notebooks/
-    └── 01_calibration.py              # Statistical calibration suite against Jan 2023–Oct 2026 BTC data (§7)
-```
-
----
-
-## Instructions for Running Tests
-
-Ensure virtual environment is activated:
 ```bash
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+pytest                        # 58 tests
+python -m sim.sweep --downstream-only   # regenerate scenarios, benchmarks, allocation, chart and tables from the logged grid
+python -m sim.sweep --full              # full 1,080-cell sweep across all three generators
 ```
 
-### 1. Run Complete Test Suite
-Runs all 41 unit and validation tests:
-```bash
-pytest tests/ -v
-```
+## Traceability note
 
-### 2. Run Historical Replays (SPEC §7)
-Runs Replay 1 (29 Oct 2026 clean unwind) and Replay 2 (10 Oct 2025 liquidation arithmetic):
-```bash
-pytest tests/test_replay_oct2025.py -v
-```
+Each record in `report/runs.jsonl` is stamped with the git commit of the code that generated it in the local development history (grid runs `7b809d8b`; downstream runs `520262df`), and scenario records carry a configuration hash binding the fund configuration, injector parameters, generator and seed. This public repository is the publication snapshot of that worktree at its final state; the stamps are preserved in the records so the generating code state for every number can be identified.
 
-### 3. Run Event Library Invariant Tests (SPEC §4)
-Verifies that S1–S11 each modify exactly the specified state variables and no others, and that S12 composes S1 + S3 + S4:
-```bash
-pytest tests/test_events.py -v
-```
+## Venue note
 
-### 4. Run Portfolio Risk & Counterparty Tests (SPEC §13.1)
-Verifies concentration shares, HHI indices, and counterparty default hooks:
-```bash
-pytest tests/test_portfolio.py -v
-```
-
-### 5. Run Fund Agent Full Verified Triggers
-Verifies wrapper peg, USDC peg, exploit detection, venue freeze, and VAULT-EXIT triggers:
-```bash
-pytest tests/test_fund_agent_triggers.py -v
-```
-
-### 6. Run Generator Calibration
-Validates moment matching, tail heaviness, and volatility clustering:
-```bash
-python notebooks/01_calibration.py
-```
+Balancer appears in this repository only as history. Balancer Labs announced its shutdown in 2026 and its pools moved to withdrawal-only, so per the venue-liveness gate (SPEC §13.3) it is excluded as a live venue everywhere in the simulation and retained solely as a venue-mortality case study.
