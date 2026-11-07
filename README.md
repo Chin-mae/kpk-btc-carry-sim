@@ -14,7 +14,7 @@ Author: Chinmay Gupta. Companion analysis of the vault-curation side (MAVERIK, a
 | [report/factsheet.md](report/factsheet.md) | Short summary of the design and results |
 | [report/scenario_table.md](report/scenario_table.md) | The generated S1 to S12 scenario table (template vs recommended, 1,000 paths each) |
 | [report/calibration.md](report/calibration.md) | Generator calibration against Jan 2023 to Oct 2026 BTC history, with the misses disclosed |
-| [report/frontier.png](report/frontier.png) | Efficient frontier chart across all 1,080 swept cells |
+| [report/frontier_data.csv](report/frontier_data.csv) | The full frontier dataset behind the chart (the chart itself regenerates with the downstream run below) |
 | [docs/SPEC.md](docs/SPEC.md) | The governing build specification (v0.3), including the venue-liveness gate in §13.3 |
 
 ## Headline results
@@ -44,7 +44,7 @@ Validation: the engine replays KPK's documented 29 October 2026 venue-freeze unw
 - `configs/`: the verified fund template (`fund_template.yaml`, checked against docs.kpk.io on 5 Nov 2026) and scenario definitions (`scenarios.yaml`)
 - `data/`: data pull script, provenance note, and the raw series used (Coinbase BTC/USD hourly, Jan 2023 to Oct 2026; DTB3 Treasury bill rates)
 - `notebooks/`: the calibration notebook
-- `report/`: memo, factsheet, scenario table, calibration note, frontier chart and data, and `runs.jsonl`, the full run log (1,126 records)
+- `report/`: memo, factsheet, scenario table, calibration note, frontier data, and `runs.jsonl`, the full run log (1,126 records)
 - `tests/`: 58 tests, including liquidation math, no-lookahead, seed reproducibility, replay checks, and a guard that fails if any downstream record's configuration differs from the selected cell
 
 ## Reproduce
