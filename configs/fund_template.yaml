@@ -1,0 +1,55 @@
+# KPK BTC Carry Fund template parameters.
+# STATUS: VERIFIED 5 Nov 2026 against docs.kpk.io primary pages:
+#   https://docs.kpk.io/funds/funds/wbtc-carry  (thresholds as of 1 Nov 2026)
+#   https://docs.kpk.io/funds/funds/cbbtc-carry (thresholds as of 4 Nov 2026)
+# Fund size/TVL and APY are NOT stated on the docs pages (live figures come from app.kpk.io).
+fund:
+  collateral_assets: [WBTC, cbBTC]
+  # The fund borrows on ONE venue at a time and can migrate to whichever offers the better carry.
+  active_venue: aave_v3_core_ethereum
+  venues:   # venue: [LLTV, target LTV at HF 1.21]  (WBTC values; cbBTC differs on Spark: [0.82, 0.678])
+    aave_v3_core:  [0.85, 0.702]
+    aave_v4_bluechip: [0.845, 0.698]
+    spark: [0.78, 0.645]
+    morpho_markets: [0.86, 0.711]
+    compound: [0.86, 0.711]   # WBTC: "under review, not yet approved"; cbBTC: approved
+  lltv: 0.85            # active venue
+  target_ltv: 0.702     # active venue; target LTV is DEFINED as the LTV giving HF 1.21 per venue
+  hf_target: 1.21
+  hf_band: [1.15, 1.25] # HF agent restores to 1.21, typically within ~2 blocks (~24s)
+  hf_full_unwind_below: 1.13
+  hf_redemption_floor: 1.14  # a redemption that would take HF below 1.14 is refused (no collateral withdrawn)
+  liquidation_bonus: 0.05
+  fees: "None (10% performance planned, WBTC page)"
+  deployment_destinations:
+    wbtc: [kpk_usdc_yield_vault, kpk_usdc_yield_rwa_vault]            # Morpho vaults, KPK-curated
+    cbbtc: [kpk_usdc_yield_vault, kpk_usdc_yield_rwa_vault, yo_ecosystem_yousd]
+  triggers_full_unwind:
+    hf_below: 1.13
+    usdc_borrow_above_vault_yield_windows: 2      # two consecutive 6h windows
+    usdc_borrow_above_vault_yield_window_hours: 6
+    btc_24h_drop_pct: -0.10
+    wrapper_peg_off_pct: 0.01        # wrapper 1% off peg sustained 40 minutes
+    wrapper_peg_duration_min: 40
+    usdc_peg_off_pct: 0.005          # USDC 0.5% off USD peg
+    exploit_detection_on_venue_or_oracle: true
+    venue_freezes_reserve_or_zeroes_ltv: true
+    venue_changes_price_source: true
+    wbtc_custodian_multisig_threshold_set_to_1: true   # WBTC fund only
+    cbbtc_owner_proxy_pauser_change_or_upgrade: true   # cbBTC fund only
+  triggers_vault_exit:   # exit a deployment vault (not the whole fund) if:
+    vault_owner_or_curator_changes: true
+    vault_share_price_drop_bp_per_min: 1   # share price drops by more than 1 bp in a minute
+  human_review_signals: [stale_oracle_feed, wrapper_paused, fund_address_blocked_on_wrapper, carry_spread_warnings]
+size:
+  design_usd: 50000000   # internal design target only; never cite externally as a client/mandate
+  live_reference_wbtc: 13.4  # KPK live WBTC carry fund size observed 4 Nov 2026 (app.kpk.io; NOT on docs pages)
+notes:
+  - "29 Oct 2026 replay nuance: the WBTC page's own account says the fund was borrowing on Aave V4 markets at the time of the freeze (v4 venue params: LLTV 84.5%, target LTV 69.8%). Phase 2 replay validation must use the v4 row, not v3 Core."
+  - "cbBTC page caution: it repeats the WBTC 29 Oct example verbatim; do not treat it as a cbBTC-specific event. cbBTC fund is still being set up (Security Council timelock queued)."
+aave_usdc_irm:           # Aave v3 Core USDC interest rate model (to be re-pulled live in Phase 0 data)
+  optimal_utilisation: 0.90
+  base_rate: 0.0
+  slope1: 0.055
+  slope2: 0.60
+  reserve_factor: 0.10

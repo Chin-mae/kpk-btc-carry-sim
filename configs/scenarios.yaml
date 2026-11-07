@@ -1,0 +1,176 @@
+# Scenario library for KPK Carry Sim per SPEC §4 (S1–S12)
+# Configured with verified parameters from configs/fund_template.yaml
+# and cited historical market events.
+
+S1:
+  id: "S1"
+  name: "Flash crash"
+  source: "10 Oct 2025 cascade"
+  affected_state:
+    - "btc_price"
+    - "borrower_cascade_active"
+    - "gas_price_multiplier"
+  trigger: "Intraday sharp sell-off triggering liquidation cascade"
+  magnitude:
+    price_drop_pct: -0.14
+    gas_multiplier: 20.0
+  duration_hours: 6
+
+S2:
+  id: "S2"
+  name: "Sustained crash"
+  source: "Mar 2020; May 2022 (LUNA)"
+  affected_state:
+    - "btc_price"
+  trigger: "Multi-day macro drawdown"
+  magnitude:
+    price_drop_pct: -0.45
+  duration_hours: 72
+
+S3:
+  id: "S3"
+  name: "Venue freeze (hack)"
+  source: "Binance hack, 29 Oct 2026"
+  affected_state:
+    - "venue_frozen"
+  trigger: "Venue emergency guardian freeze or security pause"
+  magnitude:
+    durations_hours: [1, 12, 72]
+    default_duration_hours: 12
+  duration_hours: 12
+
+S4:
+  id: "S4"
+  name: "Held-wrapper depeg"
+  source: "Kelp rsETH exploit, 18 Apr 2026 (pattern)"
+  affected_state:
+    - "wrapper_price_ratio"
+    - "arbitrageur_capital_factor"
+  trigger: "Bridge exploit or redemption suspension"
+  magnitude:
+    peg_discounts: [-0.03, -0.05, -0.08]
+    default_discount: -0.05
+    arbitrageur_capital_factor: 0.50
+    fund_trigger_peg_off: 0.01
+    fund_trigger_duration_min: 40
+  duration_hours: 24
+
+S5:
+  id: "S5"
+  name: "Collateral-issuer exploit"
+  source: "Resolv, 22 Mar 2026"
+  affected_state:
+    - "vault_asset_market_price"
+    - "vault_asset_oracle_price"
+    - "vault_real_loss"
+  trigger: "Deployment vault collateral asset exploit"
+  magnitude:
+    oracle_price: 1.13
+    market_price: 0.63
+    real_loss_pct: 0.442478
+  duration_hours: 48
+
+S6:
+  id: "S6"
+  name: "Opaque counterparty default"
+  source: "Stream Finance / xUSD, 4 Nov 2025"
+  affected_state:
+    - "vault_loss"
+    - "loss_discovery_lag_hours"
+  trigger: "Rehypothecated counterparty insolvency discovered with lag"
+  magnitude:
+    loss_severities: [0.30, 0.65, 1.00]
+    default_loss_pct: 0.65
+    discovery_lag_hours: 168
+  duration_hours: 168
+
+S7:
+  id: "S7"
+  name: "Utilisation crunch"
+  source: "EURC crunch on KPK's own vault"
+  affected_state:
+    - "deployment_vault_utilisation"
+    - "withdrawal_blocked"
+  trigger: "Deployment vault utilisation surges to 100% due to depositor run"
+  magnitude:
+    vault_utilisation: 1.00
+    withdrawal_blocked: true
+  duration_hours: 48
+
+S8:
+  id: "S8"
+  name: "Oracle failure"
+  source: "Generic, from KPK's own tier criteria"
+  affected_state:
+    - "oracle_reported_price"
+    - "oracle_stale"
+  trigger: "Erroneous price feed print (-5% for 3 hours)"
+  magnitude:
+    false_print_pct: -0.05
+    false_print_duration_hours: 3
+  duration_hours: 3
+
+S9:
+  id: "S9"
+  name: "Stablecoin depeg"
+  source: "USDC, Mar 2023 (SVB)"
+  affected_state:
+    - "usdc_price"
+  trigger: "USDC depegs intraday and recovers over 48 hours"
+  magnitude:
+    usdc_trough_price: 0.87
+    fund_trigger_peg_off: 0.005
+    recovery_hours: 48
+  duration_hours: 48
+
+S10:
+  id: "S10"
+  name: "Negative-carry regime"
+  source: "2026 compression (Ethena funding 11.0%->2.2%)"
+  affected_state:
+    - "borrow_rate"
+    - "deploy_yield"
+  trigger: "Borrow rate exceeds deployment yield over extended horizon"
+  magnitude:
+    borrow_rate_annual: 0.065
+    deploy_yield_annual: 0.022
+    duration_days: 30
+  duration_hours: 720
+
+S11:
+  id: "S11"
+  name: "Gas war"
+  source: "Historical crisis gas"
+  affected_state:
+    - "gas_price_multiplier"
+    - "transaction_failure_rate"
+  trigger: "Gas price spike causes transaction queues and failures"
+  magnitude:
+    gas_multipliers: [10.0, 25.0, 50.0]
+    default_gas_multiplier: 25.0
+    transaction_failure_rate: 0.35
+  duration_hours: 12
+
+S12:
+  id: "S12"
+  name: "Correlated failure"
+  source: "Composite (S1 + S3 + S4)"
+  affected_state:
+    - "btc_price"
+    - "borrower_cascade_active"
+    - "gas_price_multiplier"
+    - "venue_frozen"
+    - "wrapper_price_ratio"
+    - "arbitrageur_capital_factor"
+  trigger: "Crash during venue freeze with wrapper depeg"
+  sub_events:
+    - "S1"
+    - "S3"
+    - "S4"
+  magnitude:
+    price_drop_pct: -0.14
+    gas_multiplier: 20.0
+    freeze_hours: 12
+    peg_discount: -0.05
+    arbitrageur_capital_factor: 0.50
+  duration_hours: 24
