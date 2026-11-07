@@ -40,12 +40,12 @@ Validation: the engine replays KPK's documented 29 October 2026 venue-freeze unw
 
 ## Repository layout
 
-- `sim/` — the engine: price generators (`prices.py`), Aave kinked rates (`rates.py`), venue and oracle model (`venue.py`), agent populations (`agents.py`), the S1 to S12 event injectors (`events.py`), portfolio risk (`portfolio.py`), metrics (`metrics.py`) and the sweep and reporting runner (`sweep.py`)
-- `configs/` — the verified fund template (`fund_template.yaml`, checked against docs.kpk.io on 5 Nov 2026) and scenario definitions (`scenarios.yaml`)
-- `data/` — data pull script, provenance note, and the raw series used (Coinbase BTC/USD hourly, Jan 2023 to Oct 2026; DTB3 Treasury bill rates)
-- `notebooks/` — the calibration notebook
-- `report/` — memo, factsheet, scenario table, calibration note, frontier chart and data, and `runs.jsonl`, the full run log (1,126 records)
-- `tests/` — 58 tests, including liquidation math, no-lookahead, seed reproducibility, replay checks, and a guard that fails if any downstream record's configuration differs from the selected cell
+- `sim/`: the engine: price generators (`prices.py`), Aave kinked rates (`rates.py`), venue and oracle model (`venue.py`), agent populations (`agents.py`), the S1 to S12 event injectors (`events.py`), portfolio risk (`portfolio.py`), metrics (`metrics.py`) and the sweep and reporting runner (`sweep.py`)
+- `configs/`: the verified fund template (`fund_template.yaml`, checked against docs.kpk.io on 5 Nov 2026) and scenario definitions (`scenarios.yaml`)
+- `data/`: data pull script, provenance note, and the raw series used (Coinbase BTC/USD hourly, Jan 2023 to Oct 2026; DTB3 Treasury bill rates)
+- `notebooks/`: the calibration notebook
+- `report/`: memo, factsheet, scenario table, calibration note, frontier chart and data, and `runs.jsonl`, the full run log (1,126 records)
+- `tests/`: 58 tests, including liquidation math, no-lookahead, seed reproducibility, replay checks, and a guard that fails if any downstream record's configuration differs from the selected cell
 
 ## Reproduce
 
